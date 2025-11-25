@@ -1,5 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { AuthProvider } from './context/AuthContext'
+import Navbar from './components/Navbar'
 
 export const metadata: Metadata = {
   title: 'Roof Calculator MVP',
@@ -13,7 +15,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthProvider>
+          <Navbar />
+          <main>{children}</main>
+        </AuthProvider>
+      </body>
     </html>
   )
 }
