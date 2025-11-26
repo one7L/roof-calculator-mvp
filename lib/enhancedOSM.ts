@@ -22,7 +22,17 @@ import {
 } from './regionalPitch'
 import { RoofComplexity, MeasurementResult } from './roofMeasurement'
 
+// Constants
 const SQM_TO_SQFT = 10.7639
+
+/** Buffer in degrees for building search (approximately 30 meters) */
+const BUILDING_SEARCH_BUFFER_DEGREES = 0.0003
+
+/** USGS API returns this value when no elevation data is available */
+const USGS_NO_DATA_VALUE = -1000000
+
+/** Minimum angle difference (degrees) to consider a vertex significant in polygon simplification */
+const SIGNIFICANT_ANGLE_THRESHOLD_DEGREES = 15
 
 export interface OSMBuildingTags {
   building?: string
@@ -54,6 +64,11 @@ export interface GeometryAnalysis {
   compactnessRatio: number // Ratio of area to perimeter squared (circle = 0.0796)
 }
 
+export interface OSMBuildingData {
+  footprint: BuildingFootprint
+  tags: OSMBuildingTags
+}
+
 export interface EnhancedOSMResult {
   footprint: BuildingFootprint | null
   osmTags: OSMBuildingTags
@@ -78,12 +93,11 @@ export async function fetchMicrosoftBuildingFootprint(
   try {
     // Query Microsoft Building Footprints via ArcGIS
     // Uses a small buffer around the point to find the building
-    const buffer = 0.0003 // Approximately 30 meters
     const geometry = {
-      xmin: lng - buffer,
-      ymin: lat - buffer,
-      xmax: lng + buffer,
-      ymax: lat + buffer,
+      xmin: lng - BUILDING_SEARCH_BUFFER_DEGREES,
+      ymin: lat - BUILDING_SEARCH_BUFFER_DEGREES,
+      xmax: lng + BUILDING_SEARCH_BUFFER_DEGREES,
+      ymax: lat + BUILDING_SEARCH_BUFFER_DEGREES,
       spatialReference: { wkid: 4326 }
     }
     
@@ -186,7 +200,7 @@ export async function fetchUSGSElevation(
     const data = await response.json()
     
     // Handle the response format from USGS EPQS
-    if (data.value !== undefined && data.value !== -1000000) {
+    if (data.value !== undefined && data.value !== USGS_NO_DATA_VALUE) {
       return data.value
     }
     
@@ -204,17 +218,13 @@ export async function fetchUSGSElevation(
  * - roof:shape, roof:angle, roof:material
  * - building:levels, height
  * - Any other relevant tags
+ * 
+ * @returns OSMBuildingData if a building is found, null otherwise
  */
 export async function fetchEnhancedOSMData(
   lat: number,
   lng: number
-): Promise<{
-  building: {
-    geometry: { lat: number; lon: number }[]
-    tags: OSMBuildingTags
-  } | null
-  footprint: BuildingFootprint | null
-}> {
+): Promise<OSMBuildingData | null> {
   try {
     // Enhanced Overpass query to get all relevant tags
     const overpassQuery = `
@@ -236,13 +246,13 @@ export async function fetchEnhancedOSMData(
     
     if (!response.ok) {
       console.error('OSM Overpass API error:', response.status)
-      return { building: null, footprint: null }
+      return null
     }
     
     const data = await response.json()
     
     if (!data.elements || data.elements.length === 0) {
-      return { building: null, footprint: null }
+      return null
     }
     
     // Find the closest building to the query point
@@ -263,7 +273,7 @@ export async function fetchEnhancedOSMData(
     }
     
     if (!closestBuilding.geometry) {
-      return { building: null, footprint: null }
+      return null
     }
     
     const geometry = closestBuilding.geometry
@@ -278,15 +288,12 @@ export async function fetchEnhancedOSMData(
     }
     
     return {
-      building: {
-        geometry,
-        tags: closestBuilding.tags || {}
-      },
-      footprint
+      footprint,
+      tags: closestBuilding.tags || {}
     }
   } catch (error) {
     console.error('OSM Overpass fetch error:', error)
-    return { building: null, footprint: null }
+    return null
   }
 }
 
@@ -464,14 +471,14 @@ export async function getEnhancedOSMData(
     footprint = microsoftResult
     dataSources.push('Microsoft Building Footprints')
     confidence += 10 // Microsoft data improves confidence
-  } else if (osmResult.footprint) {
+  } else if (osmResult?.footprint) {
     footprint = osmResult.footprint
     dataSources.push('OpenStreetMap Footprint')
   }
   
   // Extract OSM tags if available
-  if (osmResult.building) {
-    osmTags = osmResult.building.tags
+  if (osmResult) {
+    osmTags = osmResult.tags
     dataSources.push('OpenStreetMap Tags')
   }
   
@@ -660,7 +667,6 @@ function simplifyPolygonVertexCount(geometry: { lat: number; lon: number }[]): n
   
   // Calculate angle at each vertex
   let significantVertices = 0
-  const angleThreshold = 15 // degrees
   
   for (let i = 0; i < geometry.length; i++) {
     const prev = geometry[(i - 1 + geometry.length) % geometry.length]
@@ -675,7 +681,7 @@ function simplifyPolygonVertexCount(geometry: { lat: number; lon: number }[]): n
     if (angleDiff > 180) angleDiff = 360 - angleDiff
     
     // Count if angle is significant (corner, not straight line)
-    if (angleDiff > angleThreshold) {
+    if (angleDiff > SIGNIFICANT_ANGLE_THRESHOLD_DEGREES) {
       significantVertices++
     }
   }
