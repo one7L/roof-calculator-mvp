@@ -72,6 +72,10 @@ export interface TieredMeasurementResult {
 
 const SQM_TO_SQFT = 10.7639
 
+// Default pitch for residential buildings: 4:12 = atan(4/12) = 18.43°
+// Using conservative value for OSM footprint estimation
+const DEFAULT_RESIDENTIAL_PITCH_DEGREES = 18.43
+
 /**
  * Get complexity rating from segment count
  */
@@ -261,7 +265,7 @@ export async function measureWithOpenStreetMap(
     }
     
     // OSM doesn't provide pitch data, estimate based on building type
-    // Use 4:12 (18.4°) as conservative default for residential
+    // Uses DEFAULT_RESIDENTIAL_PITCH_DEGREES (4:12 = 18.43°) as conservative default
     const estimatedPitch = estimatePitchFromBuildingType(building.tags?.building || 'yes')
     const pitchMultiplier = calculatePitchMultiplierFromDegrees(estimatedPitch)
     
@@ -591,24 +595,24 @@ function calculatePolygonArea(geometry: { lat: number; lon: number }[]): { areaS
 
 /**
  * Estimate pitch from building type
- * Uses 4:12 (18.4°) as conservative default for residential buildings
+ * Uses DEFAULT_RESIDENTIAL_PITCH_DEGREES (4:12 = 18.43°) as conservative default
  */
 function estimatePitchFromBuildingType(buildingType: string): number {
   const pitchEstimates: Record<string, number> = {
-    'house': 18.4, // 4:12 - conservative default for residential
-    'residential': 18.4,
+    'house': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
+    'residential': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
     'detached': 22, // ~5:12
     'apartments': 15,
     'commercial': 5,
     'industrial': 3,
     'retail': 5,
     'warehouse': 3,
-    'garage': 18.4,
+    'garage': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
     'shed': 15,
-    'yes': 18.4 // Default to 4:12 for unknown (conservative estimate)
+    'yes': DEFAULT_RESIDENTIAL_PITCH_DEGREES // Default for unknown
   }
   
-  return pitchEstimates[buildingType.toLowerCase()] || 18.4 // Default 4:12
+  return pitchEstimates[buildingType.toLowerCase()] || DEFAULT_RESIDENTIAL_PITCH_DEGREES
 }
 
 /**

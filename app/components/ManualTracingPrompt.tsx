@@ -24,10 +24,14 @@ export default function ManualTracingPrompt({
   onRequestProfessional
 }: ManualTracingPromptProps) {
   return (
-    <div className="bg-gradient-to-br from-orange-50 to-yellow-50 border border-orange-200 rounded-lg p-6">
+    <div 
+      className="bg-gradient-to-br from-orange-50 to-yellow-50 border border-orange-200 rounded-lg p-6"
+      role="alert"
+      aria-live="polite"
+    >
       {/* Header */}
       <div className="flex items-start mb-4">
-        <div className="flex-shrink-0">
+        <div className="flex-shrink-0" aria-hidden="true">
           <svg className="w-8 h-8 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
@@ -52,7 +56,7 @@ export default function ManualTracingPrompt({
           <ul className="space-y-1">
             {higherTierFailures.map((failure, index) => (
               <li key={index} className="text-sm text-gray-600 flex items-start">
-                <span className="text-orange-400 mr-2">•</span>
+                <span className="text-orange-400 mr-2" aria-hidden="true">•</span>
                 <span>
                   <strong>{failure.tierName}:</strong> {failure.reason}
                 </span>
