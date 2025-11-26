@@ -55,12 +55,24 @@ export default function Home() {
     setError(null)
     
     try {
-      // For demo purposes, use mock coordinates
-      // In production, this would geocode the address first
-      const lat = 37.7749
-      const lng = -122.4194
+      // Step 1: Geocode the address to get coordinates
+      const geocodeResponse = await fetch(`/api/geocode?address=${encodeURIComponent(address)}`)
       
-      const response = await fetch(`/api/solar?lat=${lat}&lng=${lng}&address=${encodeURIComponent(address)}`)
+      if (!geocodeResponse.ok) {
+        const errorData = await geocodeResponse.json()
+        throw new Error(errorData.error || 'Could not find this address. Please check and try again.')
+      }
+      
+      const geocodeData = await geocodeResponse.json()
+      const { lat, lng, formattedAddress } = geocodeData
+      
+      // Update address with formatted version if different
+      if (formattedAddress && formattedAddress !== address) {
+        setAddress(formattedAddress)
+      }
+      
+      // Step 2: Call Solar API with actual coordinates
+      const response = await fetch(`/api/solar?lat=${lat}&lng=${lng}&address=${encodeURIComponent(formattedAddress || address)}`)
       
       if (!response.ok) {
         const errorData = await response.json()
