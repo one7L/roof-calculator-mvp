@@ -1,9 +1,12 @@
 /**
  * Cross-Validation Engine
  * 
- * Queries multiple data sources and validates measurements across them.
- * Produces a weighted average based on source reliability and flags
- * significant discrepancies for manual review.
+ * UPDATED: Now uses validation mode instead of averaging mode.
+ * Secondary sources are used to FLAG potential issues with the primary
+ * measurement, not to blend measurements together.
+ * 
+ * If a secondary source differs by >15% from primary, a warning is added.
+ * The primary measurement is kept, just annotated with validation notes.
  */
 
 import { MeasurementResult, MeasurementSource, getSourceAccuracyDescription } from './roofMeasurement'
@@ -22,6 +25,20 @@ export interface SourceMeasurement {
   varianceFromFinal: number
 }
 
+export interface ValidationCheck {
+  source: string
+  measurement: number
+  varianceFromPrimary: number
+  status: 'agrees' | 'minor-variance' | 'significant-variance'
+}
+
+export interface ValidationResult {
+  primaryMeasurement: MeasurementResult
+  validationChecks: ValidationCheck[]
+  warnings: string[]
+  overallValidation: 'validated' | 'unvalidated' | 'discrepancy-detected'
+}
+
 export interface CrossValidationResult {
   finalMeasurement: MeasurementResult
   sources: SourceMeasurement[]
@@ -29,6 +46,7 @@ export interface CrossValidationResult {
   confidenceLevel: ConfidenceLevel
   discrepancies: string[]
   recommendation: string
+  validationMode: boolean // NEW: indicates validation mode is used
 }
 
 // Source reliability weights (higher = more reliable)
@@ -45,6 +63,11 @@ const VARIANCE_THRESHOLD = 15
 
 /**
  * Perform cross-validation across multiple measurement sources
+ * 
+ * UPDATED: Now uses validation mode instead of averaging.
+ * - Uses the FIRST (primary) measurement as the final result
+ * - Secondary sources are used only to FLAG potential issues
+ * - If secondary differs by >15%, adds a warning but keeps primary
  */
 export function crossValidateMeasurements(
   measurements: MeasurementResult[],
@@ -54,27 +77,28 @@ export function crossValidateMeasurements(
     return createEmptyResult()
   }
   
+  // Use the first (primary/best tier) measurement as the final result
+  // NO averaging - this is the key change from the old system
+  const primaryMeasurement = measurements[0]
+  
   // If only one source, return it directly
   if (measurements.length === 1) {
-    return createSingleSourceResult(measurements[0], gafCalibration)
+    return createSingleSourceResult(primaryMeasurement, gafCalibration)
   }
   
-  // Calculate weighted average of all measurements
-  const weightedResult = calculateWeightedAverage(measurements)
-  
-  // Calculate variance for each source
+  // Calculate variance for each source compared to primary (not to weighted average)
   const sources: SourceMeasurement[] = measurements.map(m => ({
     name: m.source,
     measurement: m,
     weight: SOURCE_WEIGHTS[m.source],
-    varianceFromFinal: calculateVariance(m.adjustedAreaSqFt, weightedResult.adjustedAreaSqFt)
+    varianceFromFinal: calculateVariance(m.adjustedAreaSqFt, primaryMeasurement.adjustedAreaSqFt)
   }))
   
   // Calculate agreement score
   const areaValues = measurements.map(m => m.adjustedAreaSqFt)
   const agreementScore = calculateSourceAgreement(areaValues)
   
-  // Identify discrepancies
+  // Identify discrepancies (sources differing >15% from primary)
   const discrepancies = identifyDiscrepancies(sources, VARIANCE_THRESHOLD)
   
   // Determine confidence level
@@ -93,17 +117,23 @@ export function crossValidateMeasurements(
   )
   
   return {
-    finalMeasurement: weightedResult,
+    finalMeasurement: primaryMeasurement, // Use primary, not weighted average
     sources,
     agreementScore,
     confidenceLevel,
     discrepancies,
-    recommendation
+    recommendation,
+    validationMode: true // Indicate we're using validation mode
   }
 }
 
 /**
  * Calculate weighted average of measurements
+ * 
+ * NOTE: This function is no longer used in the new validation mode.
+ * Kept for legacy compatibility and potential future use cases.
+ * The new approach uses the primary (best tier) measurement directly
+ * instead of averaging across sources.
  */
 function calculateWeightedAverage(measurements: MeasurementResult[]): MeasurementResult {
   let totalWeight = 0
@@ -288,7 +318,8 @@ function createEmptyResult(): CrossValidationResult {
     agreementScore: 0,
     confidenceLevel: 'low',
     discrepancies: ['No measurement sources available'],
-    recommendation: 'Unable to obtain measurements. Manual tracing or site visit required.'
+    recommendation: 'Unable to obtain measurements. Manual tracing or site visit required.',
+    validationMode: true
   }
 }
 
@@ -322,7 +353,8 @@ function createSingleSourceResult(
     agreementScore: 100, // Single source always agrees with itself
     confidenceLevel,
     discrepancies: [],
-    recommendation: generateRecommendation(confidenceLevel, [], 1, gafCalibration)
+    recommendation: generateRecommendation(confidenceLevel, [], 1, gafCalibration),
+    validationMode: true
   }
 }
 
@@ -365,5 +397,63 @@ export function meetsGafLevelCriteria(
   return { 
     meets: false, 
     reason: 'Insufficient data for GAF-level confidence. Upload a GAF report or enable additional sources.' 
+  }
+}
+
+/**
+ * NEW: Validate primary measurement against secondary sources
+ * 
+ * This is the new validation mode that replaces averaging.
+ * Secondary sources are used only to FLAG potential issues with the primary
+ * measurement, not to blend measurements together.
+ */
+export function validateMeasurement(
+  primaryMeasurement: MeasurementResult,
+  secondaryMeasurements: MeasurementResult[]
+): ValidationResult {
+  const validationChecks: ValidationCheck[] = []
+  const warnings: string[] = []
+  
+  for (const secondary of secondaryMeasurements) {
+    const variance = calculateVariance(
+      secondary.adjustedAreaSqFt, 
+      primaryMeasurement.adjustedAreaSqFt
+    )
+    
+    let status: 'agrees' | 'minor-variance' | 'significant-variance'
+    if (Math.abs(variance) <= 5) {
+      status = 'agrees'
+    } else if (Math.abs(variance) <= 15) {
+      status = 'minor-variance'
+    } else {
+      status = 'significant-variance'
+      warnings.push(
+        `${secondary.source} differs by ${Math.abs(variance).toFixed(1)}% from primary source (${primaryMeasurement.source})`
+      )
+    }
+    
+    validationChecks.push({
+      source: secondary.source,
+      measurement: secondary.adjustedAreaSqFt,
+      varianceFromPrimary: variance,
+      status
+    })
+  }
+  
+  // Determine overall validation status
+  let overallValidation: 'validated' | 'unvalidated' | 'discrepancy-detected'
+  if (validationChecks.length === 0) {
+    overallValidation = 'unvalidated'
+  } else if (warnings.length > 0) {
+    overallValidation = 'discrepancy-detected'
+  } else {
+    overallValidation = 'validated'
+  }
+  
+  return {
+    primaryMeasurement,
+    validationChecks,
+    warnings,
+    overallValidation
   }
 }

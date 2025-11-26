@@ -4,7 +4,9 @@ import { useState } from 'react'
 import ConfidenceMeter from './components/ConfidenceMeter'
 import GAFUpload, { GAFUploadData } from './components/GAFUpload'
 import CrossValidationView, { GAFComparisonView } from './components/CrossValidationView'
-import { MeasurementResult } from '@/lib/roofMeasurement'
+import SourceTierDisplay from './components/SourceTierDisplay'
+import ManualTracingPrompt from './components/ManualTracingPrompt'
+import { MeasurementResult, TierFailure } from '@/lib/roofMeasurement'
 import { CrossValidationResult } from '@/lib/crossValidation'
 import { ConfidenceResult } from '@/lib/confidenceScoring'
 
@@ -19,6 +21,20 @@ interface RoofCalculationResult {
   }
   recommendations: string[]
   enableManualTracing: boolean
+  // NEW: Tier information from API
+  source?: {
+    tier: number
+    name: string
+    accuracy: string
+    confidence: number
+  }
+  higherTierFailures?: TierFailure[]
+  dataQuality?: {
+    imageryQuality?: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN'
+    imageryAge?: string
+    segmentConfidence?: number
+  }
+  manualTracingRequired?: boolean
 }
 
 export default function Home() {
@@ -27,6 +43,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<RoofCalculationResult | null>(null)
   const [gafReport, setGafReport] = useState<{ totalAreaSqFt: number } | null>(null)
+  const [showGAFUpload, setShowGAFUpload] = useState(false)
   
   const handleCalculate = async () => {
     if (!address.trim()) {
@@ -73,11 +90,22 @@ export default function Home() {
     
     // Store the GAF report data for comparison
     setGafReport({ totalAreaSqFt: data.totalSquares * 100 })
+    setShowGAFUpload(false)
     
     // Recalculate if we have a result
     if (result) {
       handleCalculate()
     }
+  }
+  
+  const handleStartTracing = () => {
+    // In a real implementation, this would open a map-based tracing tool
+    alert('Manual tracing feature coming soon! For now, you can upload a GAF report.')
+  }
+  
+  const handleRequestProfessional = () => {
+    // In a real implementation, this would open a form to request professional measurement
+    alert('Professional measurement request feature coming soon!')
   }
   
   return (
@@ -125,51 +153,78 @@ export default function Home() {
           {/* Results Section */}
           {result && (
             <div className="space-y-6">
+              {/* Manual Tracing Prompt (if required) */}
+              {result.manualTracingRequired && (
+                <ManualTracingPrompt
+                  higherTierFailures={result.higherTierFailures}
+                  onStartTracing={handleStartTracing}
+                  onUploadGAF={() => setShowGAFUpload(true)}
+                  onRequestProfessional={handleRequestProfessional}
+                />
+              )}
+              
+              {/* Source Tier Display (when not manual tracing) */}
+              {!result.manualTracingRequired && result.source && (
+                <SourceTierDisplay
+                  tier={result.source.tier}
+                  tierName={result.source.name}
+                  accuracy={result.source.accuracy}
+                  confidence={result.source.confidence}
+                  higherTierFailures={result.higherTierFailures}
+                  imageryQuality={result.dataQuality?.imageryQuality}
+                  imageryDate={result.dataQuality?.imageryAge}
+                />
+              )}
+              
               {/* Main Results Card */}
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <h2 className="text-xl font-semibold text-gray-800 mb-4">
-                  Roof Measurement Results
-                </h2>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                  <div className="text-center p-4 bg-blue-50 rounded-lg">
-                    <div className="text-3xl font-bold text-blue-600">
-                      {result.measurement.squares.toFixed(1)}
+              {!result.manualTracingRequired && (
+                <div className="bg-white rounded-lg shadow-lg p-6">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">
+                    Roof Measurement Results
+                  </h2>
+                  
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    <div className="text-center p-4 bg-blue-50 rounded-lg">
+                      <div className="text-3xl font-bold text-blue-600">
+                        {result.measurement.squares.toFixed(1)}
+                      </div>
+                      <div className="text-sm text-gray-600">Squares</div>
                     </div>
-                    <div className="text-sm text-gray-600">Squares</div>
+                    <div className="text-center p-4 bg-green-50 rounded-lg">
+                      <div className="text-3xl font-bold text-green-600">
+                        {result.measurement.adjustedAreaSqFt.toLocaleString()}
+                      </div>
+                      <div className="text-sm text-gray-600">Total Sq Ft</div>
+                    </div>
+                    <div className="text-center p-4 bg-purple-50 rounded-lg">
+                      <div className="text-3xl font-bold text-purple-600">
+                        {result.measurement.pitchDegrees.toFixed(1)}°
+                      </div>
+                      <div className="text-sm text-gray-600">Avg Pitch</div>
+                    </div>
+                    <div className="text-center p-4 bg-orange-50 rounded-lg">
+                      <div className="text-3xl font-bold text-orange-600">
+                        {result.measurement.segmentCount}
+                      </div>
+                      <div className="text-sm text-gray-600">Segments</div>
+                    </div>
                   </div>
-                  <div className="text-center p-4 bg-green-50 rounded-lg">
-                    <div className="text-3xl font-bold text-green-600">
-                      {result.measurement.adjustedAreaSqFt.toLocaleString()}
-                    </div>
-                    <div className="text-sm text-gray-600">Total Sq Ft</div>
-                  </div>
-                  <div className="text-center p-4 bg-purple-50 rounded-lg">
-                    <div className="text-3xl font-bold text-purple-600">
-                      {result.measurement.pitchDegrees.toFixed(1)}°
-                    </div>
-                    <div className="text-sm text-gray-600">Avg Pitch</div>
-                  </div>
-                  <div className="text-center p-4 bg-orange-50 rounded-lg">
-                    <div className="text-3xl font-bold text-orange-600">
-                      {result.measurement.segmentCount}
-                    </div>
-                    <div className="text-sm text-gray-600">Segments</div>
+                  
+                  <div className="text-sm text-gray-500 text-center">
+                    Complexity: <span className="font-medium capitalize">{result.measurement.complexity}</span>
+                    {' | '}
+                    Pitch Multiplier: <span className="font-medium">{result.measurement.pitchMultiplier.toFixed(3)}</span>
                   </div>
                 </div>
-                
-                <div className="text-sm text-gray-500 text-center">
-                  Complexity: <span className="font-medium capitalize">{result.measurement.complexity}</span>
-                  {' | '}
-                  Pitch Multiplier: <span className="font-medium">{result.measurement.pitchMultiplier.toFixed(3)}</span>
-                </div>
-              </div>
+              )}
               
               {/* Confidence Meter */}
-              <ConfidenceMeter confidence={result.confidence} showDetails={true} />
+              {!result.manualTracingRequired && (
+                <ConfidenceMeter confidence={result.confidence} showDetails={true} />
+              )}
               
               {/* GAF Comparison (if available) */}
-              {gafReport && (
+              {gafReport && !result.manualTracingRequired && (
                 <GAFComparisonView
                   calculatedSqFt={result.measurement.adjustedAreaSqFt}
                   gafSqFt={gafReport.totalAreaSqFt}
@@ -179,7 +234,9 @@ export default function Home() {
               )}
               
               {/* Cross-Validation View */}
-              <CrossValidationView result={result.crossValidation} showDetails={true} />
+              {!result.manualTracingRequired && (
+                <CrossValidationView result={result.crossValidation} showDetails={true} />
+              )}
               
               {/* Recommendations */}
               {result.recommendations.length > 0 && (
@@ -218,22 +275,22 @@ export default function Home() {
               <div className="flex items-start">
                 <span className="text-green-500 text-xl mr-3">✓</span>
                 <div>
-                  <div className="font-medium text-gray-800">Accurate Pitch Multipliers</div>
-                  <div className="text-sm text-gray-600">Geometric calculations with validation</div>
+                  <div className="font-medium text-gray-800">Tiered Fallback System</div>
+                  <div className="text-sm text-gray-600">Uses best available source, not averaging</div>
                 </div>
               </div>
               <div className="flex items-start">
                 <span className="text-green-500 text-xl mr-3">✓</span>
                 <div>
-                  <div className="font-medium text-gray-800">Weighted Averaging</div>
-                  <div className="text-sm text-gray-600">Pitch weighted by segment area</div>
+                  <div className="font-medium text-gray-800">Accurate Pitch Handling</div>
+                  <div className="text-sm text-gray-600">No double pitch multiplier bug</div>
                 </div>
               </div>
               <div className="flex items-start">
                 <span className="text-green-500 text-xl mr-3">✓</span>
                 <div>
                   <div className="font-medium text-gray-800">Multi-Source Validation</div>
-                  <div className="text-sm text-gray-600">Cross-validate across data sources</div>
+                  <div className="text-sm text-gray-600">Cross-validate without blending</div>
                 </div>
               </div>
               <div className="flex items-start">
@@ -253,8 +310,8 @@ export default function Home() {
               <div className="flex items-start">
                 <span className="text-green-500 text-xl mr-3">✓</span>
                 <div>
-                  <div className="font-medium text-gray-800">Regional Calibration</div>
-                  <div className="text-sm text-gray-600">Learn from local data patterns</div>
+                  <div className="font-medium text-gray-800">Transparent Fallback Info</div>
+                  <div className="text-sm text-gray-600">See why higher-tier sources failed</div>
                 </div>
               </div>
             </div>
