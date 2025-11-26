@@ -16,6 +16,13 @@
  *         - Geometry analysis for complexity/segment estimation
  * Tier 6: Building Footprint Estimation - 40-60% accuracy
  * Tier 7: Manual Polygon Tracing (UI prompt) - 85-95% accuracy (user-dependent)
+ * 
+ * AUTONOMOUS SELF-CORRECTION SYSTEM (3-Layer):
+ * - Layer 1: Accuracy Detection - Detects when measurements need correction
+ * - Layer 2: Auto-Trace - Autonomous building tracing from satellite imagery
+ * - Layer 3: Self-Learning - Learns from GAF reports and applies corrections
+ * 
+ * Target: 90-95% accuracy using only FREE data sources
  */
 
 import { 
@@ -27,8 +34,24 @@ import {
 } from './pitchCalculations'
 import { 
   getEnhancedOSMData, 
-  enhancedOSMToMeasurement 
+  enhancedOSMToMeasurement,
+  GeometryAnalysis
 } from './enhancedOSM'
+import {
+  detectAccuracyIssues,
+  shouldTriggerAutoTrace,
+  AccuracyDetectionResult
+} from './accuracyDetection'
+import {
+  autoTraceBuilding,
+  autoTraceToMeasurement,
+  AutoTraceResult
+} from './autoTrace'
+import {
+  applyLearnedCorrection,
+  getZipCodeCorrection,
+  learnFromLiDAR
+} from './selfLearning'
 
 export type MeasurementSource = 
   | 'google-solar'
@@ -59,9 +82,11 @@ export interface MeasurementOptions {
   lat: number
   lng: number
   address?: string
+  zipCode?: string
   googleApiKey?: string
   instantRooferApiKey?: string
   enableFallbacks?: boolean
+  enableAutoCorrection?: boolean // Enable the 3-layer autonomous system
 }
 
 // Tiered fallback system types
@@ -77,6 +102,12 @@ export interface TieredMeasurementResult {
   tierName: string  // e.g., "Google Solar API (HIGH)"
   higherTierFailures: TierFailure[]
   fallbacksAvailable: string[]  // What options remain if user wants to try something else
+  // Autonomous correction system results
+  autoCorrectionApplied?: boolean
+  accuracyDetection?: AccuracyDetectionResult
+  autoTraceResult?: AutoTraceResult
+  selfLearningApplied?: boolean
+  originalMeasurement?: MeasurementResult // Before correction
 }
 
 const SQM_TO_SQFT = 10.7639
@@ -515,10 +546,34 @@ export async function getRoofMeasurementTiered(
     })
   }
   
-  // TIER 5: OpenStreetMap (Enhanced)
+  // TIER 5: OpenStreetMap (Enhanced) with Autonomous Correction System
   const osmResult = await measureWithOpenStreetMap(options.lat, options.lng, options.address)
   if (osmResult) {
     fallbacksAvailable.push('Manual Tracing')
+    
+    // If auto-correction is enabled, apply the 3-layer autonomous system
+    if (options.enableAutoCorrection !== false) {
+      const correctedResult = await applyAutonomousCorrection(
+        osmResult,
+        options.lat,
+        options.lng,
+        options.zipCode,
+        options.address
+      )
+      
+      return {
+        measurement: correctedResult.measurement,
+        tierUsed: 5,
+        tierName: TIER_NAMES[5],
+        higherTierFailures,
+        fallbacksAvailable,
+        autoCorrectionApplied: correctedResult.correctionApplied,
+        accuracyDetection: correctedResult.accuracyDetection,
+        autoTraceResult: correctedResult.autoTraceResult,
+        selfLearningApplied: correctedResult.selfLearningApplied,
+        originalMeasurement: correctedResult.correctionApplied ? osmResult : undefined
+      }
+    }
     
     return {
       measurement: osmResult,
@@ -673,4 +728,161 @@ export function getSourceAccuracyDescription(source: MeasurementSource): string 
   }
   
   return descriptions[source]
+}
+
+/**
+ * Autonomous Correction Result
+ */
+interface AutonomousCorrectionResult {
+  measurement: MeasurementResult
+  correctionApplied: boolean
+  accuracyDetection?: AccuracyDetectionResult
+  autoTraceResult?: AutoTraceResult
+  selfLearningApplied: boolean
+}
+
+/**
+ * Apply the 3-layer autonomous correction system to a measurement
+ * 
+ * Layer 1: Accuracy Detection - Detect when measurements need correction
+ * Layer 2: Auto-Trace - Autonomous building tracing from satellite imagery
+ * Layer 3: Self-Learning - Apply learned corrections from historical data
+ * 
+ * Target: Improve OSM accuracy from 75-90% to 90-95%
+ */
+async function applyAutonomousCorrection(
+  measurement: MeasurementResult,
+  lat: number,
+  lng: number,
+  zipCode?: string,
+  address?: string
+): Promise<AutonomousCorrectionResult> {
+  let correctedMeasurement = { ...measurement }
+  let correctionApplied = false
+  let accuracyDetection: AccuracyDetectionResult | undefined
+  let autoTraceResult: AutoTraceResult | undefined
+  let selfLearningApplied = false
+
+  // Layer 1: Accuracy Detection
+  // Detect if this measurement needs correction
+  accuracyDetection = detectAccuracyIssues(
+    measurement,
+    null, // geometry analysis (would need to fetch separately)
+    undefined, // secondary measurements
+    zipCode
+  )
+
+  // If accuracy detection suggests no correction needed and confidence is high, skip
+  if (!accuracyDetection.needsCorrection && measurement.confidence >= 85) {
+    return {
+      measurement,
+      correctionApplied: false,
+      accuracyDetection,
+      selfLearningApplied: false
+    }
+  }
+
+  // Layer 3: Self-Learning (check first, as it's faster)
+  // Apply learned correction if available for this zip code
+  if (zipCode) {
+    const correctionResult = applyLearnedCorrection(measurement, zipCode)
+    if (correctionResult.correctionApplied) {
+      correctedMeasurement = correctionResult.correctedMeasurement
+      selfLearningApplied = true
+      correctionApplied = true
+    }
+  }
+
+  // Layer 2: Auto-Trace (if recommended by accuracy detection)
+  // Only run auto-trace if it's recommended and we haven't already applied a significant correction
+  if (
+    accuracyDetection.recommendedAction === 'auto-trace' &&
+    (!selfLearningApplied || accuracyDetection.overallScore < 60)
+  ) {
+    try {
+      autoTraceResult = await autoTraceBuilding(
+        lat,
+        lng,
+        measurement.adjustedAreaSqFt,
+        measurement.pitchDegrees
+      )
+
+      if (autoTraceResult.success && autoTraceResult.tracedAreaSqFt > 0) {
+        // Compare auto-trace result with current measurement
+        const tracedArea = autoTraceResult.tracedAreaSqFt
+        const currentArea = correctedMeasurement.adjustedAreaSqFt
+        const variancePercent = Math.abs((tracedArea - currentArea) / currentArea) * 100
+
+        // If auto-trace differs significantly (>10%), consider using it
+        if (variancePercent > 10 && autoTraceResult.confidence >= 70) {
+          // Use weighted average if both have reasonable confidence
+          if (correctedMeasurement.confidence >= 60 && autoTraceResult.confidence >= 60) {
+            const weight1 = correctedMeasurement.confidence / 100
+            const weight2 = autoTraceResult.confidence / 100
+            const totalWeight = weight1 + weight2
+            const blendedArea = (currentArea * weight1 + tracedArea * weight2) / totalWeight
+            
+            correctedMeasurement = {
+              ...correctedMeasurement,
+              adjustedAreaSqFt: blendedArea,
+              squares: blendedArea / 100,
+              confidence: Math.min(92, (correctedMeasurement.confidence + autoTraceResult.confidence) / 2 + 5),
+              warning: `${correctedMeasurement.warning || ''} Auto-trace applied (variance: ${variancePercent.toFixed(1)}%).`.trim()
+            }
+            correctionApplied = true
+          } else if (autoTraceResult.confidence > correctedMeasurement.confidence) {
+            // Auto-trace is more confident, use it
+            correctedMeasurement = {
+              ...correctedMeasurement,
+              adjustedAreaSqFt: tracedArea,
+              squares: tracedArea / 100,
+              confidence: autoTraceResult.confidence,
+              warning: `${correctedMeasurement.warning || ''} Auto-trace measurement used.`.trim()
+            }
+            correctionApplied = true
+          }
+        }
+      }
+    } catch {
+      // Auto-trace failed, continue with current measurement
+      console.error('Auto-trace failed, using original measurement')
+    }
+  }
+
+  // If self-learning is recommended but not applied yet, try applying it now
+  if (
+    accuracyDetection.recommendedAction === 'use-self-learning' &&
+    !selfLearningApplied &&
+    zipCode
+  ) {
+    const correctionResult = applyLearnedCorrection(correctedMeasurement, zipCode)
+    if (correctionResult.correctionApplied) {
+      correctedMeasurement = correctionResult.correctedMeasurement
+      selfLearningApplied = true
+      correctionApplied = true
+    }
+  }
+
+  return {
+    measurement: correctedMeasurement,
+    correctionApplied,
+    accuracyDetection,
+    autoTraceResult,
+    selfLearningApplied
+  }
+}
+
+/**
+ * Get measurement with autonomous correction enabled
+ * 
+ * This is a convenience function that wraps getRoofMeasurementTiered
+ * with auto-correction enabled by default.
+ */
+export async function getRoofMeasurementWithAutoCorrection(
+  options: MeasurementOptions
+): Promise<TieredMeasurementResult> {
+  return getRoofMeasurementTiered({
+    ...options,
+    enableAutoCorrection: true
+  })
 }
