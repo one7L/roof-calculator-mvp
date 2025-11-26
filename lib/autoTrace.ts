@@ -12,6 +12,13 @@
  * This is part of the 3-layer autonomous self-tracing & self-learning system
  * designed to achieve 90-95% accuracy using only FREE data sources.
  * 
+ * ENHANCED: Now integrates GAF-level algorithms for full professional reports:
+ * - Multi-factor confidence calculation from confidenceScoring
+ * - Cross-validation with 15% variance threshold from crossValidation
+ * - Geometry analysis from enhancedOSM
+ * - Regional pitch estimation from regionalPitch
+ * - GAF-equivalent output generation from gafEquivalentOutput
+ * 
  * NOTE: This module implements a simplified version of image processing algorithms
  * that can run in a Node.js/browser environment without external image processing
  * libraries. For production use, consider integrating with libraries like sharp,
@@ -19,7 +26,22 @@
  */
 
 import { MeasurementResult, MeasurementSource, RoofComplexity } from './roofMeasurement'
-import { areaToSquares, calculatePitchMultiplierFromDegrees } from './pitchCalculations'
+import { areaToSquares, calculatePitchMultiplierFromDegrees, getNearestStandardPitch } from './pitchCalculations'
+import { calculateConfidence, ConfidenceFactors, ImageryQuality } from './confidenceScoring'
+import { validateMeasurement, ValidationResult } from './crossValidation'
+import { analyzeFootprintGeometry, GeometryAnalysis } from './enhancedOSM'
+import { getRegionalPitchEstimate } from './regionalPitch'
+import {
+  GAFEnhancedAutoTraceResult,
+  GAFEquivalentOutput,
+  generateGAFEquivalentOutput,
+  buildValidationStatus,
+  buildCalibrationInfo,
+  buildConfidenceBreakdown,
+  estimateLinearMeasurements,
+  calculateWasteFactor,
+  calculateMaterialQuantities
+} from './gafEquivalentOutput'
 
 /**
  * Result of auto-trace analysis
@@ -34,6 +56,11 @@ export interface AutoTraceResult {
   corrections: AutoTraceCorrection[]
   comparisonWithOsm?: OsmComparison
   error?: string
+  
+  // GAF-enhanced outputs (optional, populated when full analysis is requested)
+  gafEnhanced?: GAFEnhancedAutoTraceResult
+  geometryAnalysis?: GeometryAnalysis
+  pitchSource?: 'osm-tag' | 'regional' | 'building-type' | 'default'
 }
 
 /**
@@ -262,6 +289,166 @@ export async function autoTraceBuilding(
       error: error instanceof Error ? error.message : 'Unknown error during auto-trace'
     }
   }
+}
+
+/**
+ * Extended options for GAF-enhanced auto-trace
+ */
+export interface EnhancedAutoTraceOptions {
+  lat: number
+  lng: number
+  osmAreaSqFt?: number
+  estimatedPitchDegrees?: number
+  address?: string
+  zipCode?: string
+  config?: Partial<AutoTraceConfig>
+  generateGafReport?: boolean
+  osmMeasurement?: MeasurementResult
+  microsoftMeasurement?: MeasurementResult
+}
+
+/**
+ * Perform GAF-enhanced auto-trace with full professional report output
+ * 
+ * This is the main entry point for generating GAF-equivalent reports.
+ * It integrates all GAF-level algorithms:
+ * - Multi-factor confidence calculation
+ * - Cross-validation with 15% variance threshold
+ * - Geometry analysis for complexity estimation
+ * - Regional pitch estimation
+ * - Linear measurement estimation
+ * - Waste factor recommendation
+ * - Material quantity calculation
+ * 
+ * @param options - Enhanced auto-trace options
+ * @returns AutoTraceResult with GAF-enhanced data
+ */
+export async function autoTraceBuildingEnhanced(
+  options: EnhancedAutoTraceOptions
+): Promise<AutoTraceResult> {
+  const {
+    lat,
+    lng,
+    osmAreaSqFt,
+    address,
+    zipCode,
+    config = {},
+    generateGafReport = true,
+    osmMeasurement,
+    microsoftMeasurement
+  } = options
+  
+  // Determine pitch using regional estimation if not provided
+  let estimatedPitchDegrees = options.estimatedPitchDegrees
+  let pitchSource: 'osm-tag' | 'regional' | 'building-type' | 'default' = 'default'
+  
+  if (!estimatedPitchDegrees && address) {
+    const regionalEstimate = getRegionalPitchEstimate(address)
+    if (regionalEstimate.stateCode) {
+      estimatedPitchDegrees = regionalEstimate.pitchDegrees
+      pitchSource = 'regional'
+    }
+  }
+  
+  // Use default pitch if still not determined
+  if (!estimatedPitchDegrees) {
+    estimatedPitchDegrees = 18.43 // 4:12 default
+  }
+  
+  // Run basic auto-trace
+  const baseResult = await autoTraceBuilding(
+    lat,
+    lng,
+    osmAreaSqFt,
+    estimatedPitchDegrees,
+    config
+  )
+  
+  // If basic trace failed, return immediately
+  if (!baseResult.success || !baseResult.polygon) {
+    return baseResult
+  }
+  
+  // Add pitch source to result
+  baseResult.pitchSource = pitchSource
+  
+  // Perform geometry analysis on the traced polygon
+  const polygonForAnalysis = baseResult.polygon.vertices.map(v => ({
+    lat: v.lat,
+    lon: v.lng
+  }))
+  baseResult.geometryAnalysis = analyzeFootprintGeometry(polygonForAnalysis)
+  
+  // Generate GAF-enhanced report if requested
+  if (generateGafReport) {
+    // Create a MeasurementResult from the trace result for GAF output generation
+    const measurementFromTrace: MeasurementResult = {
+      totalAreaSqM: baseResult.tracedAreaSqM,
+      totalAreaSqFt: baseResult.tracedAreaSqFt / calculatePitchMultiplierFromDegrees(estimatedPitchDegrees),
+      adjustedAreaSqFt: baseResult.tracedAreaSqFt,
+      squares: areaToSquares(baseResult.tracedAreaSqFt),
+      pitchDegrees: estimatedPitchDegrees,
+      pitchMultiplier: calculatePitchMultiplierFromDegrees(estimatedPitchDegrees),
+      segmentCount: baseResult.geometryAnalysis?.estimatedSegments || 2,
+      complexity: baseResult.geometryAnalysis?.complexity || 'simple',
+      source: 'openstreetmap',
+      confidence: baseResult.confidence,
+      imageryQuality: 'MEDIUM' as ImageryQuality
+    }
+    
+    // Generate GAF-equivalent output
+    const gafEquivalent = generateGAFEquivalentOutput(
+      measurementFromTrace,
+      baseResult.polygon
+    )
+    
+    // Build validation status
+    const validation = buildValidationStatus(
+      measurementFromTrace,
+      osmMeasurement || null,
+      microsoftMeasurement || null
+    )
+    
+    // Build calibration info
+    const calibration = await buildCalibrationInfo(lat, lng, zipCode)
+    
+    // Build enhanced confidence using multi-factor calculation
+    const confidenceFactors: ConfidenceFactors = {
+      imageryQuality: 'MEDIUM',
+      segmentCount: measurementFromTrace.segmentCount,
+      pitchDegrees: estimatedPitchDegrees,
+      hasGafCalibration: calibration.regionHasHistoricalData,
+      hasLidarData: false,
+      sourceCount: osmMeasurement && microsoftMeasurement ? 3 : osmMeasurement ? 2 : 1,
+      sourceAgreementPercent: validation.validationStatus === 'validated' ? 90 : 
+                              validation.validationStatus === 'discrepancy-detected' ? 70 : 50
+    }
+    
+    const enhancedConfidence = calculateConfidence(confidenceFactors)
+    
+    // Build confidence breakdown
+    const confidenceBreakdown = {
+      score: enhancedConfidence.score,
+      level: enhancedConfidence.level,
+      factors: enhancedConfidence.factors
+    }
+    
+    // Assemble full GAF-enhanced result
+    baseResult.gafEnhanced = {
+      polygon: baseResult.polygon.vertices,
+      areaSqFt: baseResult.tracedAreaSqFt,
+      confidence: enhancedConfidence.score,
+      gafEquivalent,
+      validation,
+      calibration,
+      confidenceBreakdown
+    }
+    
+    // Update base result confidence with enhanced score
+    baseResult.confidence = enhancedConfidence.score
+  }
+  
+  return baseResult
 }
 
 /**
@@ -515,6 +702,7 @@ export function calculatePolygonArea(vertices: Coordinate[]): number {
 
 /**
  * Convert auto-trace result to a MeasurementResult
+ * Now uses geometry analysis if available for more accurate complexity assessment
  */
 export function autoTraceToMeasurement(
   traceResult: AutoTraceResult,
@@ -526,10 +714,26 @@ export function autoTraceToMeasurement(
 
   const pitchMultiplier = calculatePitchMultiplierFromDegrees(estimatedPitchDegrees)
 
-  const complexity: RoofComplexity = 
-    traceResult.polygon.vertexCount <= 4 ? 'simple' :
-    traceResult.polygon.vertexCount <= 8 ? 'moderate' :
-    traceResult.polygon.vertexCount <= 12 ? 'complex' : 'very-complex'
+  // Use geometry analysis if available, otherwise estimate from vertex count
+  let complexity: RoofComplexity
+  let segmentCount: number
+  
+  if (traceResult.geometryAnalysis) {
+    complexity = traceResult.geometryAnalysis.complexity
+    segmentCount = traceResult.geometryAnalysis.estimatedSegments
+  } else {
+    complexity = 
+      traceResult.polygon.vertexCount <= 4 ? 'simple' :
+      traceResult.polygon.vertexCount <= 8 ? 'moderate' :
+      traceResult.polygon.vertexCount <= 12 ? 'complex' : 'very-complex'
+    segmentCount = Math.max(2, Math.ceil(traceResult.polygon.vertexCount / 2))
+  }
+
+  // Build warning with pitch source if available
+  let warning = `Auto-traced from satellite imagery. Processing time: ${traceResult.processingTimeMs}ms`
+  if (traceResult.pitchSource) {
+    warning += `. Pitch source: ${traceResult.pitchSource}`
+  }
 
   return {
     totalAreaSqM: traceResult.tracedAreaSqM,
@@ -538,11 +742,11 @@ export function autoTraceToMeasurement(
     squares: areaToSquares(traceResult.tracedAreaSqFt),
     pitchDegrees: estimatedPitchDegrees,
     pitchMultiplier,
-    segmentCount: Math.max(2, Math.ceil(traceResult.polygon.vertexCount / 2)),
+    segmentCount,
     complexity,
     source: 'openstreetmap', // Using OSM as source since auto-trace enhances OSM
     confidence: traceResult.confidence,
-    warning: `Auto-traced from satellite imagery. Processing time: ${traceResult.processingTimeMs}ms`
+    warning
   }
 }
 

@@ -613,3 +613,274 @@ export async function importLearningData(data: {
     zipCodeModels.set(model.zipCode, model)
   }
 }
+
+/**
+ * Regional pitch pattern learned from historical data
+ */
+export interface RegionalPitchPattern {
+  stateCode: string
+  averagePitchDegrees: number
+  pitchVariance: number
+  sampleCount: number
+  buildingTypes: Record<string, number> // building type -> average pitch
+  lastUpdated: string
+}
+
+/**
+ * Building type pitch pattern
+ */
+export interface BuildingTypePitchPattern {
+  buildingType: string
+  averagePitchDegrees: number
+  pitchRange: { min: number; max: number }
+  sampleCount: number
+  byState: Record<string, number> // state -> average pitch for this building type
+  lastUpdated: string
+}
+
+// In-memory storage for pitch patterns
+const pitchPatternsByState: Map<string, RegionalPitchPattern> = new Map()
+const pitchPatternsByBuildingType: Map<string, BuildingTypePitchPattern> = new Map()
+
+/**
+ * Learn pitch pattern from a GAF report
+ * 
+ * @param stateCode - Two-letter state code
+ * @param pitchDegrees - Actual pitch from GAF report
+ * @param buildingType - Optional building type
+ */
+export function learnPitchPattern(
+  stateCode: string,
+  pitchDegrees: number,
+  buildingType?: string
+): void {
+  const normalizedState = stateCode.toUpperCase().trim()
+  
+  // Update state pattern
+  const existingState = pitchPatternsByState.get(normalizedState)
+  if (existingState) {
+    // Calculate running average
+    const newCount = existingState.sampleCount + 1
+    const newAverage = (existingState.averagePitchDegrees * existingState.sampleCount + pitchDegrees) / newCount
+    
+    // Calculate variance (simplified)
+    const diff = Math.abs(pitchDegrees - newAverage)
+    const newVariance = (existingState.pitchVariance * existingState.sampleCount + diff) / newCount
+    
+    existingState.averagePitchDegrees = newAverage
+    existingState.pitchVariance = newVariance
+    existingState.sampleCount = newCount
+    existingState.lastUpdated = new Date().toISOString()
+    
+    // Update building type within state
+    if (buildingType) {
+      const normalizedType = buildingType.toLowerCase()
+      const typeCount = (existingState.buildingTypes[`${normalizedType}_count`] as number) || 0
+      const typeAvg = existingState.buildingTypes[normalizedType] || newAverage
+      existingState.buildingTypes[normalizedType] = (typeAvg * typeCount + pitchDegrees) / (typeCount + 1)
+      existingState.buildingTypes[`${normalizedType}_count`] = typeCount + 1
+    }
+    
+    pitchPatternsByState.set(normalizedState, existingState)
+  } else {
+    // Create new state pattern
+    const buildingTypes: Record<string, number> = {}
+    if (buildingType) {
+      buildingTypes[buildingType.toLowerCase()] = pitchDegrees
+      buildingTypes[`${buildingType.toLowerCase()}_count`] = 1
+    }
+    
+    pitchPatternsByState.set(normalizedState, {
+      stateCode: normalizedState,
+      averagePitchDegrees: pitchDegrees,
+      pitchVariance: 0,
+      sampleCount: 1,
+      buildingTypes,
+      lastUpdated: new Date().toISOString()
+    })
+  }
+  
+  // Update building type pattern if provided
+  if (buildingType) {
+    const normalizedType = buildingType.toLowerCase()
+    const existingType = pitchPatternsByBuildingType.get(normalizedType)
+    
+    if (existingType) {
+      const newCount = existingType.sampleCount + 1
+      const newAverage = (existingType.averagePitchDegrees * existingType.sampleCount + pitchDegrees) / newCount
+      
+      existingType.averagePitchDegrees = newAverage
+      existingType.pitchRange = {
+        min: Math.min(existingType.pitchRange.min, pitchDegrees),
+        max: Math.max(existingType.pitchRange.max, pitchDegrees)
+      }
+      existingType.sampleCount = newCount
+      existingType.byState[normalizedState] = pitchDegrees
+      existingType.lastUpdated = new Date().toISOString()
+      
+      pitchPatternsByBuildingType.set(normalizedType, existingType)
+    } else {
+      pitchPatternsByBuildingType.set(normalizedType, {
+        buildingType: normalizedType,
+        averagePitchDegrees: pitchDegrees,
+        pitchRange: { min: pitchDegrees, max: pitchDegrees },
+        sampleCount: 1,
+        byState: { [normalizedState]: pitchDegrees },
+        lastUpdated: new Date().toISOString()
+      })
+    }
+  }
+}
+
+/**
+ * Get learned pitch estimate for a state
+ * Returns the learned pitch if available, or null if no data
+ */
+export function getLearnedPitchForState(stateCode: string): number | null {
+  const pattern = pitchPatternsByState.get(stateCode.toUpperCase())
+  if (pattern && pattern.sampleCount >= 3) {
+    return pattern.averagePitchDegrees
+  }
+  return null
+}
+
+/**
+ * Get learned pitch estimate for a building type
+ */
+export function getLearnedPitchForBuildingType(buildingType: string): number | null {
+  const pattern = pitchPatternsByBuildingType.get(buildingType.toLowerCase())
+  if (pattern && pattern.sampleCount >= 3) {
+    return pattern.averagePitchDegrees
+  }
+  return null
+}
+
+/**
+ * Get learned pitch with both state and building type context
+ * Returns the most specific estimate available
+ */
+export function getLearnedPitch(
+  stateCode?: string,
+  buildingType?: string
+): { pitchDegrees: number; confidence: number; source: string } | null {
+  // First try state + building type combination
+  if (stateCode && buildingType) {
+    const statePattern = pitchPatternsByState.get(stateCode.toUpperCase())
+    if (statePattern) {
+      const typePitch = statePattern.buildingTypes[buildingType.toLowerCase()]
+      if (typePitch && (statePattern.buildingTypes[`${buildingType.toLowerCase()}_count`] as number) >= 2) {
+        return {
+          pitchDegrees: typePitch,
+          confidence: Math.min(85, 60 + (statePattern.buildingTypes[`${buildingType.toLowerCase()}_count`] as number) * 5),
+          source: `learned-${stateCode}-${buildingType}`
+        }
+      }
+    }
+  }
+  
+  // Then try building type only
+  if (buildingType) {
+    const typePattern = pitchPatternsByBuildingType.get(buildingType.toLowerCase())
+    if (typePattern && typePattern.sampleCount >= 3) {
+      return {
+        pitchDegrees: typePattern.averagePitchDegrees,
+        confidence: Math.min(80, 50 + typePattern.sampleCount * 3),
+        source: `learned-building-type-${buildingType}`
+      }
+    }
+  }
+  
+  // Finally try state only
+  if (stateCode) {
+    const statePattern = pitchPatternsByState.get(stateCode.toUpperCase())
+    if (statePattern && statePattern.sampleCount >= 3) {
+      return {
+        pitchDegrees: statePattern.averagePitchDegrees,
+        confidence: Math.min(75, 45 + statePattern.sampleCount * 3),
+        source: `learned-state-${stateCode}`
+      }
+    }
+  }
+  
+  return null
+}
+
+/**
+ * Get all learned pitch patterns
+ */
+export function getAllPitchPatterns(): {
+  byState: RegionalPitchPattern[]
+  byBuildingType: BuildingTypePitchPattern[]
+} {
+  return {
+    byState: Array.from(pitchPatternsByState.values()),
+    byBuildingType: Array.from(pitchPatternsByBuildingType.values())
+  }
+}
+
+/**
+ * Enhanced learning from GAF report that also extracts pitch patterns
+ * 
+ * @param gafReport - The GAF report with ground truth data
+ * @param osmMeasurement - The OSM measurement for the same building
+ * @param zipCode - The zip code for regional learning
+ * @param stateCode - Optional state code for pitch pattern learning
+ * @param buildingType - Optional building type for pitch pattern learning
+ * @returns The created correction data point
+ */
+export async function learnFromGAFReportEnhanced(
+  gafReport: GAFReport,
+  osmMeasurement: MeasurementResult,
+  zipCode: string,
+  stateCode?: string,
+  buildingType?: string
+): Promise<CorrectionDataPoint> {
+  // Learn area correction factor
+  const dataPoint = await learnFromGAFReport(gafReport, osmMeasurement, zipCode)
+  
+  // Learn pitch pattern if state and pitch info available
+  if (stateCode && gafReport.pitchInfo) {
+    // Parse pitch from GAF report
+    const pitchMatch = gafReport.pitchInfo.match(/(\d+(?:\.\d+)?)\s*[:/]\s*12/)
+    if (pitchMatch) {
+      const pitchRatio = parseFloat(pitchMatch[1])
+      const pitchDegrees = Math.atan(pitchRatio / 12) * (180 / Math.PI)
+      learnPitchPattern(stateCode, pitchDegrees, buildingType)
+    }
+  }
+  
+  return dataPoint
+}
+
+/**
+ * Clear pitch pattern data (for testing purposes)
+ */
+export function clearPitchPatternData(): void {
+  pitchPatternsByState.clear()
+  pitchPatternsByBuildingType.clear()
+}
+
+/**
+ * Export pitch pattern data for backup
+ */
+export function exportPitchPatternData(): {
+  byState: RegionalPitchPattern[]
+  byBuildingType: BuildingTypePitchPattern[]
+} {
+  return getAllPitchPatterns()
+}
+
+/**
+ * Import pitch pattern data from backup
+ */
+export function importPitchPatternData(data: {
+  byState: RegionalPitchPattern[]
+  byBuildingType: BuildingTypePitchPattern[]
+}): void {
+  for (const pattern of data.byState) {
+    pitchPatternsByState.set(pattern.stateCode, pattern)
+  }
+  for (const pattern of data.byBuildingType) {
+    pitchPatternsByBuildingType.set(pattern.buildingType, pattern)
+  }
+}

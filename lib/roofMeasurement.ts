@@ -44,6 +44,7 @@ import {
 } from './accuracyDetection'
 import {
   autoTraceBuilding,
+  autoTraceBuildingEnhanced,
   autoTraceToMeasurement,
   AutoTraceResult
 } from './autoTrace'
@@ -52,6 +53,10 @@ import {
   getZipCodeCorrection,
   learnFromLiDAR
 } from './selfLearning'
+import {
+  GAFEnhancedAutoTraceResult,
+  generateGAFEnhancedFromMeasurement
+} from './gafEquivalentOutput'
 
 export type MeasurementSource = 
   | 'google-solar'
@@ -108,6 +113,8 @@ export interface TieredMeasurementResult {
   autoTraceResult?: AutoTraceResult
   selfLearningApplied?: boolean
   originalMeasurement?: MeasurementResult // Before correction
+  // GAF-enhanced output (when available)
+  gafEnhanced?: GAFEnhancedAutoTraceResult
 }
 
 const SQM_TO_SQFT = 10.7639
@@ -571,7 +578,8 @@ export async function getRoofMeasurementTiered(
         accuracyDetection: correctedResult.accuracyDetection,
         autoTraceResult: correctedResult.autoTraceResult,
         selfLearningApplied: correctedResult.selfLearningApplied,
-        originalMeasurement: correctedResult.correctionApplied ? osmResult : undefined
+        originalMeasurement: correctedResult.correctionApplied ? osmResult : undefined,
+        gafEnhanced: correctedResult.gafEnhanced
       }
     }
     
@@ -739,6 +747,7 @@ interface AutonomousCorrectionResult {
   accuracyDetection?: AccuracyDetectionResult
   autoTraceResult?: AutoTraceResult
   selfLearningApplied: boolean
+  gafEnhanced?: GAFEnhancedAutoTraceResult
 }
 
 /**
@@ -747,6 +756,8 @@ interface AutonomousCorrectionResult {
  * Layer 1: Accuracy Detection - Detect when measurements need correction
  * Layer 2: Auto-Trace - Autonomous building tracing from satellite imagery
  * Layer 3: Self-Learning - Apply learned corrections from historical data
+ * 
+ * Now also generates GAF-enhanced output for professional reports.
  * 
  * Target: Improve OSM accuracy from 75-90% to 90-95%
  */
@@ -762,6 +773,7 @@ async function applyAutonomousCorrection(
   let accuracyDetection: AccuracyDetectionResult | undefined
   let autoTraceResult: AutoTraceResult | undefined
   let selfLearningApplied = false
+  let gafEnhanced: GAFEnhancedAutoTraceResult | undefined
 
   // Layer 1: Accuracy Detection
   // Detect if this measurement needs correction
@@ -774,11 +786,20 @@ async function applyAutonomousCorrection(
 
   // If accuracy detection suggests no correction needed and confidence is high, skip
   if (!accuracyDetection.needsCorrection && measurement.confidence >= 85) {
+    // Still generate GAF-enhanced output even if no correction needed
+    gafEnhanced = await generateGAFEnhancedFromMeasurement(
+      measurement,
+      lat,
+      lng,
+      zipCode
+    )
+    
     return {
       measurement,
       correctionApplied: false,
       accuracyDetection,
-      selfLearningApplied: false
+      selfLearningApplied: false,
+      gafEnhanced
     }
   }
 
@@ -795,17 +816,22 @@ async function applyAutonomousCorrection(
 
   // Layer 2: Auto-Trace (if recommended by accuracy detection)
   // Only run auto-trace if it's recommended and we haven't already applied a significant correction
+  // Now using the enhanced auto-trace for GAF-level output
   if (
     accuracyDetection.recommendedAction === 'auto-trace' &&
     (!selfLearningApplied || accuracyDetection.overallScore < 60)
   ) {
     try {
-      autoTraceResult = await autoTraceBuilding(
+      // Use enhanced auto-trace with GAF report generation
+      autoTraceResult = await autoTraceBuildingEnhanced({
         lat,
         lng,
-        measurement.adjustedAreaSqFt,
-        measurement.pitchDegrees
-      )
+        osmAreaSqFt: measurement.adjustedAreaSqFt,
+        estimatedPitchDegrees: measurement.pitchDegrees,
+        address,
+        zipCode,
+        generateGafReport: true
+      })
 
       if (autoTraceResult.success && autoTraceResult.tracedAreaSqFt > 0) {
         // Compare auto-trace result with current measurement
@@ -842,6 +868,11 @@ async function applyAutonomousCorrection(
             correctionApplied = true
           }
         }
+        
+        // Use GAF-enhanced output from auto-trace if available
+        if (autoTraceResult.gafEnhanced) {
+          gafEnhanced = autoTraceResult.gafEnhanced
+        }
       }
     } catch (error) {
       // Auto-trace failed, continue with current measurement
@@ -864,12 +895,23 @@ async function applyAutonomousCorrection(
     }
   }
 
+  // Generate GAF-enhanced output if not already generated
+  if (!gafEnhanced) {
+    gafEnhanced = await generateGAFEnhancedFromMeasurement(
+      correctedMeasurement,
+      lat,
+      lng,
+      zipCode
+    )
+  }
+
   return {
     measurement: correctedMeasurement,
     correctionApplied,
     accuracyDetection,
     autoTraceResult,
-    selfLearningApplied
+    selfLearningApplied,
+    gafEnhanced
   }
 }
 
@@ -887,3 +929,42 @@ export async function getRoofMeasurementWithAutoCorrection(
     enableAutoCorrection: true
   })
 }
+
+/**
+ * Get GAF-enhanced measurement result
+ * 
+ * This convenience function returns a full GAF-equivalent report including:
+ * - Total squares and pitch information
+ * - Linear measurements (ridge, eaves, rakes, valleys, hips)
+ * - Waste factor recommendation
+ * - Material quantity estimates
+ * - Validation against other sources
+ * - Calibration from self-learning
+ * - Confidence breakdown with factors
+ * 
+ * @param options - Measurement options
+ * @returns TieredMeasurementResult with GAF-enhanced data
+ */
+export async function getGAFEnhancedMeasurement(
+  options: MeasurementOptions
+): Promise<TieredMeasurementResult> {
+  const result = await getRoofMeasurementTiered({
+    ...options,
+    enableAutoCorrection: true
+  })
+  
+  // If GAF-enhanced data wasn't generated (e.g., from Google Solar), generate it now
+  if (!result.gafEnhanced) {
+    result.gafEnhanced = await generateGAFEnhancedFromMeasurement(
+      result.measurement,
+      options.lat,
+      options.lng,
+      options.zipCode
+    )
+  }
+  
+  return result
+}
+
+// Re-export GAFEnhancedAutoTraceResult for external use
+export type { GAFEnhancedAutoTraceResult } from './gafEquivalentOutput'
