@@ -141,6 +141,12 @@ export async function measureWithGoogleSolar(
 
 /**
  * Fallback source: Instant Roofer API (LiDAR-based)
+ * 
+ * NOTE: This is a placeholder implementation. The URL and response format
+ * are hypothetical and should be replaced with the actual Instant Roofer API
+ * endpoint and documentation when the integration is configured.
+ * 
+ * Configure INSTANT_ROOFER_API_KEY environment variable to enable this source.
  */
 export async function measureWithInstantRoofer(
   lat: number,
@@ -148,8 +154,8 @@ export async function measureWithInstantRoofer(
   apiKey: string
 ): Promise<MeasurementResult | null> {
   try {
-    // Instant Roofer API integration
-    // This is a placeholder - actual implementation would depend on their API
+    // PLACEHOLDER: Replace with actual Instant Roofer API endpoint
+    // The actual API URL and request format may differ
     const url = `https://api.instantroofer.com/v1/measurements?lat=${lat}&lng=${lng}`
     
     const response = await fetch(url, {

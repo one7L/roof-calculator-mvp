@@ -4,7 +4,18 @@
  * Provides interfaces and mock database functionality for storing
  * GAF reports and calibration data.
  * 
- * In a production environment, this would connect to a real database.
+ * ⚠️ IMPORTANT: This module uses IN-MEMORY storage for demonstration purposes.
+ * Data will be lost when the server restarts.
+ * 
+ * For production deployment, replace the in-memory Maps with a persistent
+ * database such as:
+ * - PostgreSQL with Prisma
+ * - MongoDB
+ * - Supabase
+ * - PlanetScale
+ * 
+ * The interfaces (GAFReport, RegionalCalibration, etc.) define the schema
+ * and should remain consistent when migrating to a real database.
  */
 
 export interface GAFReport {
@@ -44,8 +55,12 @@ export interface CalibrationDataPoint {
   lng: number
 }
 
-// In-memory storage for demo purposes
-// In production, this would be replaced with actual database calls
+/**
+ * ⚠️ DEMO ONLY: In-memory storage
+ * 
+ * These Maps store data in memory and will be cleared on server restart.
+ * Replace with persistent database connections for production use.
+ */
 const gafReports: Map<string, GAFReport> = new Map()
 const regionalCalibrations: Map<string, RegionalCalibration> = new Map()
 

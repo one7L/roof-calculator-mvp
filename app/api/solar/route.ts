@@ -9,6 +9,7 @@ import { getRoofMeasurement, MeasurementResult } from '@/lib/roofMeasurement'
 import { crossValidateMeasurements, CrossValidationResult } from '@/lib/crossValidation'
 import { calculateConfidence, ConfidenceResult } from '@/lib/confidenceScoring'
 import { getCalibrationForLocation, findGAFReportForLocation, GAFCalibrationResult } from '@/lib/gafReports'
+import { calculatePitchMultiplierFromDegrees, areaToSquares } from '@/lib/pitchCalculations'
 
 export interface SolarAPIResponse {
   measurement: MeasurementResult
@@ -182,7 +183,6 @@ export async function POST(request: NextRequest) {
     
     // Create measurement result from manual input
     const pitchDegrees = manualPitch || 20 // Default to 20 degrees if not provided
-    const { calculatePitchMultiplierFromDegrees, areaToSquares } = await import('@/lib/pitchCalculations')
     const pitchMultiplier = calculatePitchMultiplierFromDegrees(pitchDegrees)
     const adjustedAreaSqFt = manualArea * pitchMultiplier
     
