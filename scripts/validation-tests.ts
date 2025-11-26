@@ -1,7 +1,7 @@
 /**
  * Roof Measurement System Validation Tests
  * 
- * This script automates validation of the autonomous roof measurement system:
+ * Automates validation of the autonomous roof measurement system:
  * 1. Real Satellite Image Processing - autoTraceBuildingEnhanced
  * 2. Linear Measurements Calculation - estimateLinearMeasurements
  * 3. Database-Persisted Self-Learning - weighted moving average
@@ -184,7 +184,7 @@ async function testSatelliteImageProcessing(): Promise<void> {
     if (roofAreaSqFt >= expectedAreaMin && roofAreaSqFt <= expectedAreaMax) {
       logPass(
         'Roof area calculation',
-        `Area: ${roofAreaSqFt.toFixed(0)} sq ft (expected ~2,100 sq ft)`,
+        `Area: ${roofAreaSqFt.toFixed(0)} sq ft`,
         `Within acceptable range: ${expectedAreaMin}-${expectedAreaMax} sq ft`
       )
     } else {
