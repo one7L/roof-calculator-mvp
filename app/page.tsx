@@ -1,32 +1,263 @@
 'use client'
 
+import { useState } from 'react'
+import ConfidenceMeter from './components/ConfidenceMeter'
+import GAFUpload, { GAFUploadData } from './components/GAFUpload'
+import CrossValidationView, { GAFComparisonView } from './components/CrossValidationView'
+import { MeasurementResult } from '@/lib/roofMeasurement'
+import { CrossValidationResult } from '@/lib/crossValidation'
+import { ConfidenceResult } from '@/lib/confidenceScoring'
+
+interface RoofCalculationResult {
+  measurement: MeasurementResult
+  crossValidation: CrossValidationResult
+  confidence: ConfidenceResult
+  gafCalibration?: {
+    calibrationFactor: number
+    basedOnReports: number
+    lastCalibrated: string
+  }
+  recommendations: string[]
+  enableManualTracing: boolean
+}
+
 export default function Home() {
+  const [address, setAddress] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<RoofCalculationResult | null>(null)
+  const [gafReport, setGafReport] = useState<{ totalAreaSqFt: number } | null>(null)
+  
+  const handleCalculate = async () => {
+    if (!address.trim()) {
+      setError('Please enter an address')
+      return
+    }
+    
+    setIsLoading(true)
+    setError(null)
+    
+    try {
+      // For demo purposes, use mock coordinates
+      // In production, this would geocode the address first
+      const lat = 37.7749
+      const lng = -122.4194
+      
+      const response = await fetch(`/api/solar?lat=${lat}&lng=${lng}&address=${encodeURIComponent(address)}`)
+      
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to calculate roof measurements')
+      }
+      
+      const data: RoofCalculationResult = await response.json()
+      setResult(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+  
+  const handleGAFUpload = async (data: GAFUploadData) => {
+    const response = await fetch('/api/gaf-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    })
+    
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(errorData.errors?.join(', ') || 'Upload failed')
+    }
+    
+    // Store the GAF report data for comparison
+    setGafReport({ totalAreaSqFt: data.totalSquares * 100 })
+    
+    // Recalculate if we have a result
+    if (result) {
+      handleCalculate()
+    }
+  }
+  
   return (
     <main className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      <div className="container mx-auto px-4 py-16">
+      <div className="container mx-auto px-4 py-8">
         <div className="max-w-4xl mx-auto">
-          <h1 className="text-5xl font-bold text-gray-900 mb-4">
+          {/* Header */}
+          <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-2">
             🏠 Roof Calculator MVP
           </h1>
-          <p className="text-xl text-gray-700 mb-8">
-            Automated roof square footage calculator using Google Solar API for precise roofing measurements.
+          <p className="text-lg text-gray-700 mb-8">
+            Automated roof measurements with cross-validation and GAF-level accuracy
           </p>
           
-          <div className="bg-white rounded-lg shadow-lg p-8">
-            <h2 className="text-2xl font-semibold text-gray-800 mb-4">
-              Welcome to Phase 1
+          {/* Address Input */}
+          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 className="text-xl font-semibold text-gray-800 mb-4">
+              Enter Property Address
             </h2>
-            <p className="text-gray-600 mb-4">
-              This is the initial setup of your roof calculator application. 
-              The following features will be implemented:
-            </p>
-            <ul className="list-disc list-inside text-gray-600 space-y-2">
-              <li>Address input with Google Geocoding API</li>
-              <li>Roof measurements using Google Solar API</li>
-              <li>Automatic pitch detection and calculations</li>
-              <li>Complexity scoring system</li>
-              <li>95% accuracy target vs GAF reports</li>
-            </ul>
+            <div className="flex flex-col md:flex-row gap-4">
+              <input
+                type="text"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="123 Main Street, City, State, ZIP"
+                className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && handleCalculate()}
+              />
+              <button
+                onClick={handleCalculate}
+                disabled={isLoading}
+                className="px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:bg-blue-300 transition-colors"
+              >
+                {isLoading ? 'Calculating...' : 'Calculate Roof'}
+              </button>
+            </div>
+            
+            {error && (
+              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700">
+                {error}
+              </div>
+            )}
+          </div>
+          
+          {/* Results Section */}
+          {result && (
+            <div className="space-y-6">
+              {/* Main Results Card */}
+              <div className="bg-white rounded-lg shadow-lg p-6">
+                <h2 className="text-xl font-semibold text-gray-800 mb-4">
+                  Roof Measurement Results
+                </h2>
+                
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="text-center p-4 bg-blue-50 rounded-lg">
+                    <div className="text-3xl font-bold text-blue-600">
+                      {result.measurement.squares.toFixed(1)}
+                    </div>
+                    <div className="text-sm text-gray-600">Squares</div>
+                  </div>
+                  <div className="text-center p-4 bg-green-50 rounded-lg">
+                    <div className="text-3xl font-bold text-green-600">
+                      {result.measurement.adjustedAreaSqFt.toLocaleString()}
+                    </div>
+                    <div className="text-sm text-gray-600">Total Sq Ft</div>
+                  </div>
+                  <div className="text-center p-4 bg-purple-50 rounded-lg">
+                    <div className="text-3xl font-bold text-purple-600">
+                      {result.measurement.pitchDegrees.toFixed(1)}°
+                    </div>
+                    <div className="text-sm text-gray-600">Avg Pitch</div>
+                  </div>
+                  <div className="text-center p-4 bg-orange-50 rounded-lg">
+                    <div className="text-3xl font-bold text-orange-600">
+                      {result.measurement.segmentCount}
+                    </div>
+                    <div className="text-sm text-gray-600">Segments</div>
+                  </div>
+                </div>
+                
+                <div className="text-sm text-gray-500 text-center">
+                  Complexity: <span className="font-medium capitalize">{result.measurement.complexity}</span>
+                  {' | '}
+                  Pitch Multiplier: <span className="font-medium">{result.measurement.pitchMultiplier.toFixed(3)}</span>
+                </div>
+              </div>
+              
+              {/* Confidence Meter */}
+              <ConfidenceMeter confidence={result.confidence} showDetails={true} />
+              
+              {/* GAF Comparison (if available) */}
+              {gafReport && (
+                <GAFComparisonView
+                  calculatedSqFt={result.measurement.adjustedAreaSqFt}
+                  gafSqFt={gafReport.totalAreaSqFt}
+                  calibrationApplied={!!result.gafCalibration}
+                  adjustedSqFt={result.gafCalibration ? result.measurement.adjustedAreaSqFt : undefined}
+                />
+              )}
+              
+              {/* Cross-Validation View */}
+              <CrossValidationView result={result.crossValidation} showDetails={true} />
+              
+              {/* Recommendations */}
+              {result.recommendations.length > 0 && (
+                <div className="bg-white rounded-lg shadow-lg p-6">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                    Recommendations
+                  </h3>
+                  <ul className="space-y-2">
+                    {result.recommendations.map((rec, index) => (
+                      <li key={index} className="flex items-start">
+                        <span className="text-blue-500 mr-2">•</span>
+                        <span className="text-gray-700">{rec}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* GAF Upload Section */}
+          <div className="mt-6">
+            <GAFUpload
+              onUpload={handleGAFUpload}
+              address={address}
+              userId="demo-user"
+            />
+          </div>
+          
+          {/* Features List */}
+          <div className="bg-white rounded-lg shadow-lg p-6 mt-6">
+            <h2 className="text-xl font-semibold text-gray-800 mb-4">
+              Features
+            </h2>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">Accurate Pitch Multipliers</div>
+                  <div className="text-sm text-gray-600">Geometric calculations with validation</div>
+                </div>
+              </div>
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">Weighted Averaging</div>
+                  <div className="text-sm text-gray-600">Pitch weighted by segment area</div>
+                </div>
+              </div>
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">Multi-Source Validation</div>
+                  <div className="text-sm text-gray-600">Cross-validate across data sources</div>
+                </div>
+              </div>
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">Confidence Scoring</div>
+                  <div className="text-sm text-gray-600">GAF-level accuracy indicators</div>
+                </div>
+              </div>
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">GAF Report Integration</div>
+                  <div className="text-sm text-gray-600">Upload historical reports for calibration</div>
+                </div>
+              </div>
+              <div className="flex items-start">
+                <span className="text-green-500 text-xl mr-3">✓</span>
+                <div>
+                  <div className="font-medium text-gray-800">Regional Calibration</div>
+                  <div className="text-sm text-gray-600">Learn from local data patterns</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
