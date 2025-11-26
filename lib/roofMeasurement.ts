@@ -843,9 +843,10 @@ async function applyAutonomousCorrection(
           }
         }
       }
-    } catch {
+    } catch (error) {
       // Auto-trace failed, continue with current measurement
-      console.error('Auto-trace failed, using original measurement')
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      console.error(`Auto-trace failed at coordinates (${lat}, ${lng}): ${errorMessage}`)
     }
   }
 

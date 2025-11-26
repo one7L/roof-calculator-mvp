@@ -60,6 +60,12 @@ export interface AccuracyDetectionConfig {
 }
 
 /**
+ * Default pitch in degrees for residential buildings (4:12 pitch)
+ * This is the conservative default used when no actual pitch data is available
+ */
+const DEFAULT_RESIDENTIAL_PITCH_DEGREES = 18.43
+
+/**
  * Default configuration values
  */
 const DEFAULT_CONFIG: AccuracyDetectionConfig = {
@@ -170,8 +176,8 @@ export function detectAccuracyIssues(
   }
 
   // Check 5: Missing pitch data
-  if (measurement.pitchDegrees === 0 || measurement.pitchDegrees === 18.43) {
-    // 18.43 is the default 4:12 pitch, might indicate missing actual data
+  if (measurement.pitchDegrees === 0 || measurement.pitchDegrees === DEFAULT_RESIDENTIAL_PITCH_DEGREES) {
+    // DEFAULT_RESIDENTIAL_PITCH_DEGREES is the default 4:12 pitch, might indicate missing actual data
     if (measurement.source === 'openstreetmap') {
       issues.push({
         type: 'missing-pitch-data',

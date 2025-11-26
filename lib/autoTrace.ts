@@ -291,9 +291,12 @@ async function analyzeImageArea(
   // 3. Find contours
   // 4. Identify the building contour at the center
 
-  // For simulation, we estimate based on typical residential building sizes
+  // MOCK IMPLEMENTATION: Use deterministic estimation based on location hash
+  // This provides consistent results for testing while varying by location
   // Average US home is ~2,200 sq ft footprint
-  const baseFootprintSqFt = 2000 + Math.random() * 500 // 2000-2500 sq ft range
+  const locationHash = Math.abs(hashCoordinates(lat, lng))
+  const variation = (locationHash % 500) // 0-499 variation
+  const baseFootprintSqFt = 2000 + variation // 2000-2499 sq ft range (deterministic)
   const estimatedFootprintSqM = baseFootprintSqFt / 10.7639
 
   return {
@@ -303,7 +306,17 @@ async function analyzeImageArea(
 }
 
 /**
- * Simulate polygon tracing from image analysis
+ * Generate a deterministic hash from coordinates for consistent mock results
+ */
+function hashCoordinates(lat: number, lng: number): number {
+  // Simple hash function for coordinates
+  const latInt = Math.round(lat * 1000000)
+  const lngInt = Math.round(lng * 1000000)
+  return ((latInt * 31) ^ lngInt) >>> 0
+}
+
+/**
+ * MOCK: Simulate polygon tracing from image analysis
  * In a real implementation, this would use actual image processing
  */
 function simulatePolygonTracing(
@@ -313,7 +326,9 @@ function simulatePolygonTracing(
 ): TracedPolygon {
   // Create a realistic building polygon
   // Most residential buildings are roughly rectangular
-  const aspectRatio = 1.5 + Math.random() * 0.5 // 1.5 to 2.0 aspect ratio
+  // Use deterministic aspect ratio based on location
+  const locationHash = hashCoordinates(lat, lng)
+  const aspectRatio = 1.5 + (locationHash % 50) / 100 // 1.5 to 2.0 aspect ratio (deterministic)
   
   // Calculate dimensions from area
   const width = Math.sqrt(areaSqM / aspectRatio)
@@ -558,21 +573,33 @@ export function getSatelliteImageUrl(
 }
 
 /**
- * Apply Canny-like edge detection (simplified simulation)
- * In production, use a proper image processing library
+ * PLACEHOLDER/MOCK: Simulated Canny-like edge detection
+ * 
+ * This is a development placeholder that returns mock edge detection results.
+ * For production use, replace with a real implementation using:
+ * - Node.js: sharp, opencv4nodejs, or jimp libraries
+ * - Browser: canvas-based processing or WebGL
+ * - Cloud: Google Cloud Vision API, AWS Rekognition, or Azure Computer Vision
+ * 
+ * A real implementation would:
+ * 1. Convert image to grayscale
+ * 2. Apply Gaussian blur to reduce noise
+ * 3. Calculate gradients using Sobel operators
+ * 4. Apply non-maximum suppression
+ * 5. Apply double threshold and edge tracking (hysteresis)
+ * 
+ * @param imageWidth - Width of the image in pixels
+ * @param imageHeight - Height of the image in pixels
+ * @param threshold - Edge detection threshold (0-255)
+ * @returns Array of contours, each contour is an array of pixel coordinates
  */
 export function simulateCannyEdgeDetection(
   imageWidth: number,
   imageHeight: number,
   threshold: number
 ): PixelCoordinate[][] {
-  // This is a placeholder that returns a simulated edge detection result
-  // In a real implementation, this would:
-  // 1. Convert image to grayscale
-  // 2. Apply Gaussian blur
-  // 3. Calculate gradients
-  // 4. Apply non-maximum suppression
-  // 5. Apply double threshold and edge tracking
+  // MOCK IMPLEMENTATION: Returns a simple rectangular contour for development
+  // In production, this would process actual image data
 
   // Return simulated contours (rectangular building shape)
   const margin = Math.min(imageWidth, imageHeight) * 0.2

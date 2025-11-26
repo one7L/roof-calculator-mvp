@@ -93,12 +93,24 @@ function generateId(): string {
 }
 
 /**
+ * Format a warning message for self-learning corrections
+ * 
+ * @param correctionFactor - The correction factor applied
+ * @param sampleCount - Number of samples used for the correction
+ * @returns Formatted warning message
+ */
+function formatCorrectionWarning(correctionFactor: number, sampleCount: number): string {
+  return `Self-learning correction applied (factor: ${correctionFactor.toFixed(3)}, based on ${sampleCount} samples).`
+}
+
+/**
  * Learn from a GAF report by comparing it with OSM measurement
  * 
  * @param gafReport - The GAF report with ground truth data
  * @param osmMeasurement - The OSM measurement for the same building
  * @param zipCode - The zip code for regional learning
  * @returns The created correction data point
+ * @throws Error if OSM measurement has zero area (invalid measurement)
  */
 export async function learnFromGAFReport(
   gafReport: GAFReport,
@@ -109,7 +121,13 @@ export async function learnFromGAFReport(
   
   const groundTruthSqFt = gafReport.totalAreaSqFt
   const osmAreaSqFt = osmMeasurement.adjustedAreaSqFt
-  const correctionFactor = osmAreaSqFt > 0 ? groundTruthSqFt / osmAreaSqFt : 1
+  
+  // Validate that OSM measurement is valid
+  if (osmAreaSqFt <= 0) {
+    throw new Error(`Cannot learn from invalid OSM measurement: adjustedAreaSqFt is ${osmAreaSqFt}`)
+  }
+  
+  const correctionFactor = groundTruthSqFt / osmAreaSqFt
 
   const dataPoint: CorrectionDataPoint = {
     id: generateId(),
@@ -134,6 +152,12 @@ export async function learnFromGAFReport(
 
 /**
  * Learn from a LiDAR measurement comparison
+ * 
+ * @param lidarAreaSqFt - The LiDAR measurement (ground truth)
+ * @param osmMeasurement - The OSM measurement for the same building
+ * @param zipCode - The zip code for regional learning
+ * @returns The created correction data point
+ * @throws Error if OSM measurement has zero area (invalid measurement)
  */
 export async function learnFromLiDAR(
   lidarAreaSqFt: number,
@@ -143,7 +167,13 @@ export async function learnFromLiDAR(
   const normalizedZip = zipCode.substring(0, 5)
   
   const osmAreaSqFt = osmMeasurement.adjustedAreaSqFt
-  const correctionFactor = osmAreaSqFt > 0 ? lidarAreaSqFt / osmAreaSqFt : 1
+  
+  // Validate that OSM measurement is valid
+  if (osmAreaSqFt <= 0) {
+    throw new Error(`Cannot learn from invalid OSM measurement: adjustedAreaSqFt is ${osmAreaSqFt}`)
+  }
+  
+  const correctionFactor = lidarAreaSqFt / osmAreaSqFt
 
   const dataPoint: CorrectionDataPoint = {
     id: generateId(),
@@ -367,12 +397,19 @@ export function applyLearnedCorrection(
   const correctedAreaSqFt = measurement.adjustedAreaSqFt * model.correctionFactor
   const confidenceBoost = Math.min(15, model.weightedConfidence - measurement.confidence)
   
+  // Format the warning message
+  const correctionWarning = formatCorrectionWarning(
+    model.correctionFactor,
+    model.sampleCount
+  )
+  const existingWarning = measurement.warning ? `${measurement.warning} ` : ''
+  
   const correctedMeasurement: MeasurementResult = {
     ...measurement,
     adjustedAreaSqFt: correctedAreaSqFt,
     squares: correctedAreaSqFt / 100,
     confidence: Math.min(95, measurement.confidence + Math.max(0, confidenceBoost)),
-    warning: `${measurement.warning || ''} Self-learning correction applied (factor: ${model.correctionFactor.toFixed(3)}, based on ${model.sampleCount} samples).`.trim()
+    warning: `${existingWarning}${correctionWarning}`.trim()
   }
 
   return {
