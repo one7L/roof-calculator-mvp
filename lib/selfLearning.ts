@@ -615,14 +615,24 @@ export async function importLearningData(data: {
 }
 
 /**
+ * Building type pitch data within a region
+ */
+export interface BuildingTypePitchData {
+  averagePitch: number
+  sampleCount: number
+}
+
+/**
  * Regional pitch pattern learned from historical data
  */
 export interface RegionalPitchPattern {
   stateCode: string
   averagePitchDegrees: number
-  pitchVariance: number
+  /** Mean absolute deviation from average (not true variance) */
+  pitchDeviation: number
   sampleCount: number
-  buildingTypes: Record<string, number> // building type -> average pitch
+  /** Building type pitch data by normalized building type name */
+  buildingTypeData: Map<string, BuildingTypePitchData>
   lastUpdated: string
 }
 
@@ -645,9 +655,12 @@ const pitchPatternsByBuildingType: Map<string, BuildingTypePitchPattern> = new M
 /**
  * Learn pitch pattern from a GAF report
  * 
- * @param stateCode - Two-letter state code
+ * Updates running averages for pitch by state and building type.
+ * Note: The state code is normalized to uppercase.
+ * 
+ * @param stateCode - Two-letter state code (will be normalized to uppercase)
  * @param pitchDegrees - Actual pitch from GAF report
- * @param buildingType - Optional building type
+ * @param buildingType - Optional building type (will be normalized to lowercase)
  */
 export function learnPitchPattern(
   stateCode: string,
@@ -663,39 +676,48 @@ export function learnPitchPattern(
     const newCount = existingState.sampleCount + 1
     const newAverage = (existingState.averagePitchDegrees * existingState.sampleCount + pitchDegrees) / newCount
     
-    // Calculate variance (simplified)
+    // Calculate mean absolute deviation (a simpler measure of spread)
     const diff = Math.abs(pitchDegrees - newAverage)
-    const newVariance = (existingState.pitchVariance * existingState.sampleCount + diff) / newCount
+    const newDeviation = (existingState.pitchDeviation * existingState.sampleCount + diff) / newCount
     
     existingState.averagePitchDegrees = newAverage
-    existingState.pitchVariance = newVariance
+    existingState.pitchDeviation = newDeviation
     existingState.sampleCount = newCount
     existingState.lastUpdated = new Date().toISOString()
     
-    // Update building type within state
+    // Update building type within state using proper Map structure
     if (buildingType) {
       const normalizedType = buildingType.toLowerCase()
-      const typeCount = (existingState.buildingTypes[`${normalizedType}_count`] as number) || 0
-      const typeAvg = existingState.buildingTypes[normalizedType] || newAverage
-      existingState.buildingTypes[normalizedType] = (typeAvg * typeCount + pitchDegrees) / (typeCount + 1)
-      existingState.buildingTypes[`${normalizedType}_count`] = typeCount + 1
+      const existingTypeData = existingState.buildingTypeData.get(normalizedType)
+      if (existingTypeData) {
+        const typeNewCount = existingTypeData.sampleCount + 1
+        existingTypeData.averagePitch = (existingTypeData.averagePitch * existingTypeData.sampleCount + pitchDegrees) / typeNewCount
+        existingTypeData.sampleCount = typeNewCount
+      } else {
+        existingState.buildingTypeData.set(normalizedType, {
+          averagePitch: pitchDegrees,
+          sampleCount: 1
+        })
+      }
     }
     
     pitchPatternsByState.set(normalizedState, existingState)
   } else {
-    // Create new state pattern
-    const buildingTypes: Record<string, number> = {}
+    // Create new state pattern with Map for building types
+    const buildingTypeData = new Map<string, BuildingTypePitchData>()
     if (buildingType) {
-      buildingTypes[buildingType.toLowerCase()] = pitchDegrees
-      buildingTypes[`${buildingType.toLowerCase()}_count`] = 1
+      buildingTypeData.set(buildingType.toLowerCase(), {
+        averagePitch: pitchDegrees,
+        sampleCount: 1
+      })
     }
     
     pitchPatternsByState.set(normalizedState, {
       stateCode: normalizedState,
       averagePitchDegrees: pitchDegrees,
-      pitchVariance: 0,
+      pitchDeviation: 0,
       sampleCount: 1,
-      buildingTypes,
+      buildingTypeData,
       lastUpdated: new Date().toISOString()
     })
   }
@@ -767,11 +789,11 @@ export function getLearnedPitch(
   if (stateCode && buildingType) {
     const statePattern = pitchPatternsByState.get(stateCode.toUpperCase())
     if (statePattern) {
-      const typePitch = statePattern.buildingTypes[buildingType.toLowerCase()]
-      if (typePitch && (statePattern.buildingTypes[`${buildingType.toLowerCase()}_count`] as number) >= 2) {
+      const typeData = statePattern.buildingTypeData.get(buildingType.toLowerCase())
+      if (typeData && typeData.sampleCount >= 2) {
         return {
-          pitchDegrees: typePitch,
-          confidence: Math.min(85, 60 + (statePattern.buildingTypes[`${buildingType.toLowerCase()}_count`] as number) * 5),
+          pitchDegrees: typeData.averagePitch,
+          confidence: Math.min(85, 60 + typeData.sampleCount * 5),
           source: `learned-${stateCode}-${buildingType}`
         }
       }

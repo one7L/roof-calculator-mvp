@@ -41,6 +41,9 @@ import {
   ZipCodeCorrectionModel 
 } from './selfLearning'
 
+// Conversion constants
+const METERS_TO_FEET = 3.28084
+
 /**
  * Linear measurements derived from polygon geometry
  */
@@ -161,15 +164,15 @@ export function estimateLinearMeasurements(
   }
   
   // Convert perimeter from meters to feet
-  const perimeterFt = polygon.perimeterM * 3.28084
+  const perimeterFt = polygon.perimeterM * METERS_TO_FEET
   
   // Calculate approximate building dimensions
   const bbox = polygon.boundingBox
   const latSpanM = (bbox.maxLat - bbox.minLat) * 110540
   const lngSpanM = (bbox.maxLng - bbox.minLng) * 111320 * Math.cos(polygon.centroid.lat * Math.PI / 180)
   
-  const lengthFt = Math.max(latSpanM, lngSpanM) * 3.28084
-  const widthFt = Math.min(latSpanM, lngSpanM) * 3.28084
+  const lengthFt = Math.max(latSpanM, lngSpanM) * METERS_TO_FEET
+  const widthFt = Math.min(latSpanM, lngSpanM) * METERS_TO_FEET
   
   // Estimate based on complexity and typical roof patterns
   let ridgeLengthFt: number

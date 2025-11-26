@@ -382,6 +382,8 @@ export async function autoTraceBuildingEnhanced(
   // Generate GAF-enhanced report if requested
   if (generateGafReport) {
     // Create a MeasurementResult from the trace result for GAF output generation
+    // Note: tracedAreaSqFt is the adjusted/sloped area (with pitch multiplier applied)
+    // totalAreaSqFt should be the footprint area, so we divide by the pitch multiplier
     const measurementFromTrace: MeasurementResult = {
       totalAreaSqM: baseResult.tracedAreaSqM,
       totalAreaSqFt: baseResult.tracedAreaSqFt / calculatePitchMultiplierFromDegrees(estimatedPitchDegrees),
