@@ -2,13 +2,15 @@
  * Roof Measurement Module
  * 
  * Provides a unified interface for obtaining roof measurements from multiple sources
- * with a fallback chain:
+ * with a tiered fallback system (prioritizes the BEST available source, not averaging):
  * 
- * 1. Google Solar API (Primary) - 90-95% accuracy
- * 2. Instant Roofer API (LiDAR-based, if configured) - 95-98% accuracy
- * 3. OpenStreetMap Building Data - 50-70% accuracy
- * 4. Building Footprint Estimation - 40-60% accuracy
- * 5. Manual Polygon Tracing (UI fallback) - 85-95% accuracy
+ * Tier 1: LiDAR (Instant Roofer API) - 95-98% accuracy
+ * Tier 2: Google Solar API (HIGH quality) - 92-95% accuracy
+ * Tier 3: Google Solar API (MEDIUM quality) - 85-90% accuracy
+ * Tier 4: Google Solar API (LOW quality) - 75-85% accuracy
+ * Tier 5: OpenStreetMap + Estimated Pitch - 50-70% accuracy
+ * Tier 6: Building Footprint Estimation - 40-60% accuracy
+ * Tier 7: Manual Polygon Tracing (UI prompt) - 85-95% accuracy (user-dependent)
  */
 
 import { 
@@ -53,7 +55,26 @@ export interface MeasurementOptions {
   enableFallbacks?: boolean
 }
 
+// Tiered fallback system types
+export interface TierFailure {
+  tier: number
+  tierName: string
+  reason: string
+}
+
+export interface TieredMeasurementResult {
+  measurement: MeasurementResult
+  tierUsed: number  // 1-7
+  tierName: string  // e.g., "Google Solar API (HIGH)"
+  higherTierFailures: TierFailure[]
+  fallbacksAvailable: string[]  // What options remain if user wants to try something else
+}
+
 const SQM_TO_SQFT = 10.7639
+
+// Default pitch for residential buildings: 4:12 = atan(4/12) = 18.43°
+// Using conservative value for OSM footprint estimation
+const DEFAULT_RESIDENTIAL_PITCH_DEGREES = 18.43
 
 /**
  * Get complexity rating from segment count
@@ -67,6 +88,10 @@ function getComplexity(segmentCount: number): RoofComplexity {
 
 /**
  * Primary source: Google Solar API
+ * 
+ * IMPORTANT: The Google Solar API's roofSegmentStats[].stats.areaMeters2 already
+ * returns the SLOPED roof surface area, NOT the footprint area. Therefore, we
+ * do NOT apply the pitch multiplier to this data - it would cause 8-41% inflation.
  */
 export async function measureWithGoogleSolar(
   lat: number,
@@ -97,15 +122,18 @@ export async function measureWithGoogleSolar(
     }))
     
     // Calculate total area from segments
+    // NOTE: Google Solar API already returns sloped surface area (adjusted for pitch)
+    // so we use this directly as the adjusted area - NO pitch multiplier needed!
     const totalAreaSqM = roofSegments.reduce((sum, seg) => sum + (seg.stats?.areaMeters2 || 0), 0)
     const totalAreaSqFt = totalAreaSqM * SQM_TO_SQFT
     
-    // Calculate weighted average pitch
+    // Calculate weighted average pitch (for display/reference only)
     const avgPitch = calculateWeightedAveragePitch(roofSegments)
     const pitchMultiplier = calculatePitchMultiplierFromDegrees(avgPitch)
     
-    // Apply pitch multiplier for adjusted area
-    const adjustedAreaSqFt = totalAreaSqFt * pitchMultiplier
+    // For Google Solar API, the area IS already the sloped surface area
+    // DO NOT apply pitch multiplier again - this was causing 8-41% inflation!
+    const adjustedAreaSqFt = totalAreaSqFt
     
     // Get imagery metadata
     const imageryDate = data.imageryDate?.date 
@@ -194,6 +222,9 @@ export async function measureWithInstantRoofer(
 
 /**
  * Fallback source: OpenStreetMap Building Data
+ * 
+ * NOTE: OSM provides FOOTPRINT area only, so we MUST apply pitch multiplier
+ * to get the actual sloped roof surface area.
  */
 export async function measureWithOpenStreetMap(
   lat: number,
@@ -226,22 +257,24 @@ export async function measureWithOpenStreetMap(
     // Find the closest building
     const building = data.elements[0]
     
-    // Calculate area from polygon (simplified)
-    const footprintArea = calculatePolygonArea(building.geometry || [])
+    // Calculate area from polygon - returns {areaSqM, areaSqFt}
+    const areaResult = calculatePolygonArea(building.geometry || [])
     
-    if (footprintArea === 0) {
+    if (areaResult.areaSqM === 0) {
       return null
     }
     
     // OSM doesn't provide pitch data, estimate based on building type
+    // Uses DEFAULT_RESIDENTIAL_PITCH_DEGREES (4:12 = 18.43°) as conservative default
     const estimatedPitch = estimatePitchFromBuildingType(building.tags?.building || 'yes')
     const pitchMultiplier = calculatePitchMultiplierFromDegrees(estimatedPitch)
     
-    const adjustedAreaSqFt = footprintArea * pitchMultiplier
+    // OSM provides FOOTPRINT area, so we MUST apply pitch multiplier
+    const adjustedAreaSqFt = areaResult.areaSqFt * pitchMultiplier
     
     return {
-      totalAreaSqM: footprintArea / SQM_TO_SQFT,
-      totalAreaSqFt: footprintArea,
+      totalAreaSqM: areaResult.areaSqM,
+      totalAreaSqFt: areaResult.areaSqFt,
       adjustedAreaSqFt,
       squares: areaToSquares(adjustedAreaSqFt),
       pitchDegrees: estimatedPitch,
@@ -250,7 +283,7 @@ export async function measureWithOpenStreetMap(
       complexity: 'simple',
       source: 'openstreetmap',
       confidence: 60,
-      warning: 'Pitch estimated from building type; actual roof area may vary'
+      warning: 'Pitch estimated from building type (default 4:12 for residential); actual roof area may vary significantly'
     }
   } catch (error) {
     console.error('OpenStreetMap API error:', error)
@@ -301,81 +334,240 @@ export function createManualTracingPlaceholder(): MeasurementResult {
   }
 }
 
+// Tier name definitions for the tiered fallback system
+const TIER_NAMES: Record<number, string> = {
+  1: 'LiDAR (Instant Roofer)',
+  2: 'Google Solar API (HIGH)',
+  3: 'Google Solar API (MEDIUM)',
+  4: 'Google Solar API (LOW)',
+  5: 'OpenStreetMap + Estimated Pitch',
+  6: 'Building Footprint Estimation',
+  7: 'Manual Polygon Tracing'
+}
+
+const TIER_ACCURACY: Record<number, string> = {
+  1: '95-98%',
+  2: '92-95%',
+  3: '85-90%',
+  4: '75-85%',
+  5: '50-70%',
+  6: '40-60%',
+  7: '85-95%'
+}
+
 /**
- * Main measurement function with fallback chain
+ * NEW: Tiered fallback measurement system
+ * 
+ * Tries each tier in order and returns the FIRST successful result.
+ * Does NOT average results - uses the best available source.
+ * 
+ * Tier Priority:
+ * 1. LiDAR (Instant Roofer API) - 95-98% accuracy
+ * 2. Google Solar API (HIGH quality) - 92-95% accuracy
+ * 3. Google Solar API (MEDIUM quality) - 85-90% accuracy
+ * 4. Google Solar API (LOW quality) - 75-85% accuracy
+ * 5. OpenStreetMap + Estimated Pitch - 50-70% accuracy
+ * 6. Building Footprint Estimation - 40-60% accuracy
+ * 7. Manual Polygon Tracing (UI prompt) - 85-95% accuracy
+ */
+export async function getRoofMeasurementTiered(
+  options: MeasurementOptions
+): Promise<TieredMeasurementResult> {
+  const higherTierFailures: TierFailure[] = []
+  const fallbacksAvailable: string[] = []
+  
+  // TIER 1: LiDAR (Instant Roofer API)
+  if (options.instantRooferApiKey) {
+    const lidarResult = await measureWithInstantRoofer(
+      options.lat,
+      options.lng,
+      options.instantRooferApiKey
+    )
+    if (lidarResult) {
+      // Add remaining fallbacks
+      if (options.googleApiKey) fallbacksAvailable.push('Google Solar API')
+      fallbacksAvailable.push('OpenStreetMap', 'Manual Tracing')
+      
+      return {
+        measurement: lidarResult,
+        tierUsed: 1,
+        tierName: TIER_NAMES[1],
+        higherTierFailures,
+        fallbacksAvailable
+      }
+    }
+    higherTierFailures.push({
+      tier: 1,
+      tierName: TIER_NAMES[1],
+      reason: 'LiDAR data not available for this location'
+    })
+  } else {
+    higherTierFailures.push({
+      tier: 1,
+      tierName: TIER_NAMES[1],
+      reason: 'Instant Roofer API key not configured'
+    })
+  }
+  
+  // TIER 2-4: Google Solar API (with quality sub-tiers)
+  if (options.googleApiKey) {
+    const solarResult = await measureWithGoogleSolar(
+      options.lat,
+      options.lng,
+      options.googleApiKey
+    )
+    
+    if (solarResult) {
+      // Determine which quality tier based on imagery quality
+      let tier: number
+      if (solarResult.imageryQuality === 'HIGH') {
+        tier = 2
+      } else if (solarResult.imageryQuality === 'MEDIUM') {
+        tier = 3
+        // Add failure for higher quality tier
+        higherTierFailures.push({
+          tier: 2,
+          tierName: TIER_NAMES[2],
+          reason: 'Only MEDIUM quality imagery available (not HIGH)'
+        })
+      } else {
+        tier = 4
+        // Add failures for higher quality tiers
+        higherTierFailures.push({
+          tier: 2,
+          tierName: TIER_NAMES[2],
+          reason: 'Only LOW quality imagery available (not HIGH)'
+        })
+        higherTierFailures.push({
+          tier: 3,
+          tierName: TIER_NAMES[3],
+          reason: 'Only LOW quality imagery available (not MEDIUM)'
+        })
+      }
+      
+      // Add remaining fallbacks
+      fallbacksAvailable.push('OpenStreetMap', 'Manual Tracing')
+      
+      return {
+        measurement: solarResult,
+        tierUsed: tier,
+        tierName: TIER_NAMES[tier],
+        higherTierFailures,
+        fallbacksAvailable
+      }
+    }
+    
+    higherTierFailures.push({
+      tier: 2,
+      tierName: 'Google Solar API',
+      reason: 'No building data available for this location'
+    })
+  } else {
+    higherTierFailures.push({
+      tier: 2,
+      tierName: 'Google Solar API',
+      reason: 'Google Solar API key not configured'
+    })
+  }
+  
+  // TIER 5: OpenStreetMap
+  const osmResult = await measureWithOpenStreetMap(options.lat, options.lng)
+  if (osmResult) {
+    fallbacksAvailable.push('Manual Tracing')
+    
+    return {
+      measurement: osmResult,
+      tierUsed: 5,
+      tierName: TIER_NAMES[5],
+      higherTierFailures,
+      fallbacksAvailable
+    }
+  }
+  
+  higherTierFailures.push({
+    tier: 5,
+    tierName: TIER_NAMES[5],
+    reason: 'No building footprint found in OpenStreetMap for this location'
+  })
+  
+  // TIER 6: Building Footprint Estimation
+  const footprintResult = await measureWithFootprintEstimation(
+    options.lat,
+    options.lng,
+    options.address
+  )
+  if (footprintResult) {
+    fallbacksAvailable.push('Manual Tracing')
+    
+    return {
+      measurement: footprintResult,
+      tierUsed: 6,
+      tierName: TIER_NAMES[6],
+      higherTierFailures,
+      fallbacksAvailable
+    }
+  }
+  
+  higherTierFailures.push({
+    tier: 6,
+    tierName: TIER_NAMES[6],
+    reason: 'Insufficient data for footprint estimation'
+  })
+  
+  // TIER 7: Manual Polygon Tracing (fallback)
+  return {
+    measurement: createManualTracingPlaceholder(),
+    tierUsed: 7,
+    tierName: TIER_NAMES[7],
+    higherTierFailures,
+    fallbacksAvailable: []
+  }
+}
+
+/**
+ * Get tier accuracy description
+ */
+export function getTierAccuracy(tier: number): string {
+  return TIER_ACCURACY[tier] || 'Unknown'
+}
+
+/**
+ * Get tier name
+ */
+export function getTierName(tier: number): string {
+  return TIER_NAMES[tier] || 'Unknown'
+}
+
+/**
+ * Main measurement function with fallback chain (legacy, uses tiered system internally)
  */
 export async function getRoofMeasurement(
   options: MeasurementOptions
 ): Promise<{ result: MeasurementResult; allResults: MeasurementResult[]; enableManualTracing: boolean }> {
-  const allResults: MeasurementResult[] = []
-  let result: MeasurementResult | null = null
+  // Use the new tiered system
+  const tieredResult = await getRoofMeasurementTiered(options)
   
-  // Try Google Solar API first
-  if (options.googleApiKey) {
-    result = await measureWithGoogleSolar(options.lat, options.lng, options.googleApiKey)
-    if (result) {
-      allResults.push(result)
-      if (!options.enableFallbacks) {
-        return { result, allResults, enableManualTracing: false }
-      }
-    }
+  // Convert to legacy format for backward compatibility
+  const allResults: MeasurementResult[] = [tieredResult.measurement]
+  const enableManualTracing = tieredResult.tierUsed === 7
+  
+  return {
+    result: tieredResult.measurement,
+    allResults,
+    enableManualTracing
   }
-  
-  // Try Instant Roofer API if available
-  if (options.instantRooferApiKey) {
-    const instantRooferResult = await measureWithInstantRoofer(
-      options.lat, 
-      options.lng, 
-      options.instantRooferApiKey
-    )
-    if (instantRooferResult) {
-      allResults.push(instantRooferResult)
-      if (!result) {
-        result = instantRooferResult
-      }
-    }
-  }
-  
-  // Try OpenStreetMap if still no result or if fallbacks enabled
-  if (!result || options.enableFallbacks) {
-    const osmResult = await measureWithOpenStreetMap(options.lat, options.lng)
-    if (osmResult) {
-      allResults.push(osmResult)
-      if (!result) {
-        result = osmResult
-      }
-    }
-  }
-  
-  // Try footprint estimation as last automated fallback
-  if (!result) {
-    const footprintResult = await measureWithFootprintEstimation(
-      options.lat,
-      options.lng,
-      options.address
-    )
-    if (footprintResult) {
-      allResults.push(footprintResult)
-      result = footprintResult
-    }
-  }
-  
-  // If still no result, enable manual tracing
-  if (!result) {
-    result = createManualTracingPlaceholder()
-    return { result, allResults, enableManualTracing: true }
-  }
-  
-  return { result, allResults, enableManualTracing: false }
 }
 
 /**
  * Calculate polygon area using Shoelace formula
- * Returns area in square feet
+ * Returns area in both square meters and square feet
+ * 
+ * FIX: Previously returned only sq ft but caller was incorrectly treating
+ * it as sq meters in some places. Now returns both explicitly.
  */
-function calculatePolygonArea(geometry: { lat: number; lon: number }[]): number {
+function calculatePolygonArea(geometry: { lat: number; lon: number }[]): { areaSqM: number; areaSqFt: number } {
   if (!geometry || geometry.length < 3) {
-    return 0
+    return { areaSqM: 0, areaSqFt: 0 }
   }
   
   let area = 0
@@ -393,29 +585,34 @@ function calculatePolygonArea(geometry: { lat: number; lon: number }[]): number 
     area -= x2 * y1
   }
   
-  // Convert sq meters to sq feet
-  return Math.abs(area / 2) * SQM_TO_SQFT
+  // Area is in square meters
+  const areaSqM = Math.abs(area / 2)
+  // Convert to square feet
+  const areaSqFt = areaSqM * SQM_TO_SQFT
+  
+  return { areaSqM, areaSqFt }
 }
 
 /**
  * Estimate pitch from building type
+ * Uses DEFAULT_RESIDENTIAL_PITCH_DEGREES (4:12 = 18.43°) as conservative default
  */
 function estimatePitchFromBuildingType(buildingType: string): number {
   const pitchEstimates: Record<string, number> = {
-    'house': 22, // ~5:12
-    'residential': 22,
-    'detached': 25,
+    'house': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
+    'residential': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
+    'detached': 22, // ~5:12
     'apartments': 15,
     'commercial': 5,
     'industrial': 3,
     'retail': 5,
     'warehouse': 3,
-    'garage': 20,
+    'garage': DEFAULT_RESIDENTIAL_PITCH_DEGREES,
     'shed': 15,
-    'yes': 20 // Default for unknown
+    'yes': DEFAULT_RESIDENTIAL_PITCH_DEGREES // Default for unknown
   }
   
-  return pitchEstimates[buildingType.toLowerCase()] || 20
+  return pitchEstimates[buildingType.toLowerCase()] || DEFAULT_RESIDENTIAL_PITCH_DEGREES
 }
 
 /**

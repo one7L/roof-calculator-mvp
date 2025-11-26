@@ -1,11 +1,18 @@
 /**
  * Solar API Route
  * 
- * Provides roof measurements with cross-validation and confidence scoring.
+ * Provides roof measurements using a tiered fallback system.
+ * Returns the BEST available source, not an average of all sources.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getRoofMeasurement, MeasurementResult } from '@/lib/roofMeasurement'
+import { 
+  getRoofMeasurementTiered, 
+  MeasurementResult,
+  TieredMeasurementResult,
+  TierFailure,
+  getTierAccuracy
+} from '@/lib/roofMeasurement'
 import { crossValidateMeasurements, CrossValidationResult } from '@/lib/crossValidation'
 import { calculateConfidence, ConfidenceResult } from '@/lib/confidenceScoring'
 import { getCalibrationForLocation, findGAFReportForLocation, GAFCalibrationResult } from '@/lib/gafReports'
@@ -22,6 +29,20 @@ export interface SolarAPIResponse {
   }
   recommendations: string[]
   enableManualTracing: boolean
+  // NEW: Tiered system information
+  source: {
+    tier: number
+    name: string
+    accuracy: string
+    confidence: number
+  }
+  higherTierFailures?: TierFailure[]
+  dataQuality: {
+    imageryQuality?: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN'
+    imageryAge?: string
+    segmentConfidence?: number
+  }
+  manualTracingRequired: boolean
 }
 
 export async function GET(request: NextRequest) {
@@ -57,15 +78,17 @@ export async function GET(request: NextRequest) {
       )
     }
     
-    // Get measurements from all available sources
-    const { result, allResults, enableManualTracing } = await getRoofMeasurement({
+    // Get measurements using the NEW tiered fallback system
+    const tieredResult = await getRoofMeasurementTiered({
       lat,
       lng,
       address,
       googleApiKey,
-      instantRooferApiKey,
-      enableFallbacks: true
+      instantRooferApiKey
     })
+    
+    const result = tieredResult.measurement
+    const enableManualTracing = tieredResult.tierUsed === 7
     
     // Check for GAF calibration data
     let gafCalibration: GAFCalibrationResult | undefined
@@ -78,8 +101,8 @@ export async function GET(request: NextRequest) {
       gafCalibration = await getCalibrationForLocation(lat, lng, result.adjustedAreaSqFt) || undefined
     }
     
-    // Cross-validate measurements
-    const crossValidation = crossValidateMeasurements(allResults, gafCalibration)
+    // Cross-validate measurements (now in validation mode, not averaging)
+    const crossValidation = crossValidateMeasurements([result], gafCalibration)
     
     // Calculate detailed confidence
     const confidence = calculateConfidence({
@@ -87,22 +110,23 @@ export async function GET(request: NextRequest) {
       imageryDate: result.imageryDate,
       segmentCount: result.segmentCount,
       pitchDegrees: result.pitchDegrees,
-      sourceCount: allResults.length,
-      sourceAgreementPercent: crossValidation.agreementScore,
+      sourceCount: 1,
+      sourceAgreementPercent: 100,
       hasGafCalibration: !!gafCalibration?.exactMatch,
-      hasLidarData: allResults.some(r => r.source === 'instant-roofer')
+      hasLidarData: result.source === 'instant-roofer'
     })
     
-    // Generate recommendations
+    // Generate recommendations based on tier used
     const recommendations = generateRecommendations(
       crossValidation,
       confidence,
+      tieredResult,
       gafCalibration,
       enableManualTracing
     )
     
     // Apply calibration if available
-    let finalMeasurement = crossValidation.finalMeasurement
+    let finalMeasurement = result
     if (gafCalibration && gafCalibration.calibrationFactor !== 1.0) {
       finalMeasurement = {
         ...finalMeasurement,
@@ -121,7 +145,23 @@ export async function GET(request: NextRequest) {
         lastCalibrated: gafCalibration.lastCalibrated
       } : undefined,
       recommendations,
-      enableManualTracing
+      enableManualTracing,
+      // NEW: Tier information
+      source: {
+        tier: tieredResult.tierUsed,
+        name: tieredResult.tierName,
+        accuracy: getTierAccuracy(tieredResult.tierUsed),
+        confidence: result.confidence
+      },
+      higherTierFailures: tieredResult.higherTierFailures.length > 0 
+        ? tieredResult.higherTierFailures 
+        : undefined,
+      dataQuality: {
+        imageryQuality: result.imageryQuality,
+        imageryAge: result.imageryDate,
+        segmentConfidence: result.confidence
+      },
+      manualTracingRequired: enableManualTracing
     }
     
     return NextResponse.json(response)
@@ -137,20 +177,40 @@ export async function GET(request: NextRequest) {
 function generateRecommendations(
   crossValidation: CrossValidationResult,
   confidence: ConfidenceResult,
+  tieredResult: TieredMeasurementResult,
   gafCalibration?: GAFCalibrationResult,
   enableManualTracing?: boolean
 ): string[] {
   const recommendations: string[] = []
+  
+  // Add tier-specific recommendations
+  if (tieredResult.tierUsed >= 5) {
+    // Low tier - strongly suggest alternatives
+    recommendations.push('⚠️ Using lower-accuracy data source. For better accuracy:')
+    recommendations.push('• Upload a GAF report for this address')
+    recommendations.push('• Use manual tracing to outline the roof')
+    recommendations.push('• Consider requesting a professional measurement')
+  } else if (tieredResult.tierUsed >= 3) {
+    // Medium tier
+    recommendations.push('📊 Using moderate-accuracy data source.')
+    if (!gafCalibration) {
+      recommendations.push('Upload a GAF report to improve confidence.')
+    }
+  }
   
   // Add main cross-validation recommendation
   recommendations.push(crossValidation.recommendation)
   
   // Add confidence-based recommendations
   if (confidence.level === 'low') {
-    recommendations.push('Upload a historical GAF report for this address to improve accuracy.')
-    recommendations.push('Consider requesting a professional roof measurement.')
+    if (!recommendations.some(r => r.includes('GAF report'))) {
+      recommendations.push('Upload a historical GAF report for this address to improve accuracy.')
+    }
+    if (!recommendations.some(r => r.includes('professional'))) {
+      recommendations.push('Consider requesting a professional roof measurement.')
+    }
   } else if (confidence.level === 'moderate') {
-    if (!gafCalibration) {
+    if (!gafCalibration && !recommendations.some(r => r.includes('GAF'))) {
       recommendations.push('Upload a GAF report to achieve GAF-level confidence.')
     }
   }
@@ -165,6 +225,15 @@ function generateRecommendations(
     recommendations.push('Use the manual tracing tool to outline the roof for more accurate measurements.')
   }
   
+  // Add higher tier failure info if applicable
+  if (tieredResult.higherTierFailures.length > 0 && tieredResult.tierUsed > 2) {
+    const failureReasons = tieredResult.higherTierFailures
+      .slice(0, 2)
+      .map(f => `${f.tierName}: ${f.reason}`)
+      .join('; ')
+    recommendations.push(`ℹ️ Why higher-accuracy sources weren't used: ${failureReasons}`)
+  }
+  
   return recommendations
 }
 
@@ -172,7 +241,7 @@ export async function POST(request: NextRequest) {
   // Handle manual tracing submission
   try {
     const body = await request.json()
-    const { lat, lng, address, manualArea, manualPitch } = body
+    const { manualArea, manualPitch } = body
     
     if (!manualArea || manualArea <= 0) {
       return NextResponse.json(
@@ -216,7 +285,21 @@ export async function POST(request: NextRequest) {
         'Manual measurements provided. Consider verifying with site visit.',
         'Upload a GAF report if available for calibration.'
       ],
-      enableManualTracing: false
+      enableManualTracing: false,
+      // Manual tracing is Tier 7
+      source: {
+        tier: 7,
+        name: 'Manual Polygon Tracing',
+        accuracy: '85-95%',
+        confidence: 85
+      },
+      higherTierFailures: undefined,
+      dataQuality: {
+        imageryQuality: undefined,
+        imageryAge: undefined,
+        segmentConfidence: 85
+      },
+      manualTracingRequired: false
     }
     
     return NextResponse.json(response)
