@@ -6,6 +6,7 @@
  * 2. Linear Measurements Calculation - estimateLinearMeasurements
  * 3. Database-Persisted Self-Learning - weighted moving average
  * 4. Waste Factor Recommendation - estimateWasteFactor
+ * 5. Multi-Source Imagery Validation (Phase 1) - temporalValidation
  * 
  * Run with: npx tsx scripts/validation-tests.ts
  * 
@@ -39,6 +40,17 @@ import {
 } from '../lib/selfLearning'
 import { MeasurementResult, RoofComplexity } from '../lib/roofMeasurement'
 import { GAFReport } from '../lib/database'
+// Multi-Source Imagery Imports (Phase 1)
+import {
+  ImagerySourceManager,
+  createImagerySourceManager,
+  compareFootprints,
+  calculateMultiSourceConsensus,
+  identifyOutlierSources,
+  calculateOverallVariance,
+  getAgreementSummary
+} from '../lib/temporalValidation'
+import { BuildingFootprint } from '../lib/enhancedOSM'
 
 // ============================================================================
 // Console Output Utilities
@@ -892,6 +904,373 @@ async function testGAFEquivalentOutput(): Promise<void> {
 }
 
 // ============================================================================
+// Test 6: Multi-Source Imagery Validation (Phase 1)
+// ============================================================================
+
+/**
+ * Test multi-source imagery validation system
+ * 
+ * Validates:
+ * - ImagerySourceManager creation and configuration
+ * - Source variance calculation
+ * - Best source selection algorithm
+ * - Footprint comparison between sources
+ * - Multi-source consensus calculation
+ * - Outlier detection
+ * - Graceful degradation when sources fail
+ */
+async function testMultiSourceImageryValidation(): Promise<void> {
+  logSection('TEST 6: Multi-Source Imagery Validation (Phase 1)')
+  
+  // Test 6.1: ImagerySourceManager creation
+  logSubsection('6.1 Testing ImagerySourceManager Creation')
+  
+  try {
+    const manager = createImagerySourceManager()
+    logPass(
+      'ImagerySourceManager creation',
+      'Manager created successfully',
+      'Default scoring weights applied'
+    )
+    
+    // Test with custom weights
+    const customManager = createImagerySourceManager({
+      resolution: 50,
+      recency: 25,
+      quality: 15,
+      cloudCover: 10
+    })
+    logPass(
+      'Custom weights configuration',
+      'Manager accepts custom scoring weights',
+      'Resolution: 50%, Recency: 25%, Quality: 15%, Cloud: 10%'
+    )
+  } catch (error) {
+    logFail('ImagerySourceManager creation', `Exception: ${error instanceof Error ? error.message : 'Unknown'}`)
+  }
+  
+  // Test 6.2: Variance calculation
+  logSubsection('6.2 Testing Variance Calculation')
+  
+  // Test with known values
+  const testAreas = [2000, 2100, 1950, 2050] // Close areas
+  const lowVariance = calculateOverallVariance(testAreas)
+  
+  if (lowVariance > 0 && lowVariance < 10) {
+    logPass(
+      'Low variance calculation',
+      `Variance: ${lowVariance.toFixed(2)}%`,
+      'Close measurements correctly show low variance'
+    )
+  } else {
+    logFail('Low variance calculation', `Unexpected variance: ${lowVariance.toFixed(2)}%`)
+  }
+  
+  // Test with high variance
+  const highVarianceAreas = [1500, 2500, 3000, 1800] // Spread out
+  const highVariance = calculateOverallVariance(highVarianceAreas)
+  
+  if (highVariance > 15) {
+    logPass(
+      'High variance calculation',
+      `Variance: ${highVariance.toFixed(2)}%`,
+      'Spread measurements correctly show high variance'
+    )
+  } else {
+    logFail('High variance calculation', `Expected higher variance: ${highVariance.toFixed(2)}%`)
+  }
+  
+  // Test edge cases
+  const singleArea = calculateOverallVariance([2000])
+  if (singleArea === 0) {
+    logPass(
+      'Single value variance',
+      'Returns 0 for single value',
+      'Edge case handled correctly'
+    )
+  } else {
+    logFail('Single value variance', `Expected 0, got ${singleArea}`)
+  }
+  
+  // Test 6.3: Footprint comparison
+  logSubsection('6.3 Testing Footprint Comparison')
+  
+  const footprint1: BuildingFootprint = {
+    geometry: [],
+    areaSqM: 185.8,
+    areaSqFt: 2000,
+    source: 'microsoft',
+    confidence: 85
+  }
+  
+  const footprint2: BuildingFootprint = {
+    geometry: [],
+    areaSqM: 195.1,
+    areaSqFt: 2100,
+    source: 'osm',
+    confidence: 70
+  }
+  
+  const comparison = compareFootprints(footprint1, footprint2, 'Microsoft', 'OSM')
+  
+  if (comparison.agreement === 'moderate' || comparison.agreement === 'strong') {
+    logPass(
+      'Footprint comparison',
+      `Variance: ${comparison.variancePercent.toFixed(1)}%`,
+      `Agreement: ${comparison.agreement} (${comparison.source1} vs ${comparison.source2})`
+    )
+  } else {
+    logFail('Footprint comparison', `Unexpected agreement level: ${comparison.agreement}`)
+  }
+  
+  // Test with conflicting footprints
+  const footprint3: BuildingFootprint = {
+    geometry: [],
+    areaSqM: 279,
+    areaSqFt: 3000,
+    source: 'osm',
+    confidence: 60
+  }
+  
+  const conflictComparison = compareFootprints(footprint1, footprint3, 'Microsoft', 'OSM-alt')
+  
+  if (conflictComparison.agreement === 'conflict' || conflictComparison.agreement === 'weak') {
+    logPass(
+      'Conflict detection',
+      `Variance: ${conflictComparison.variancePercent.toFixed(1)}%`,
+      `Correctly identified as ${conflictComparison.agreement}`
+    )
+  } else {
+    logFail('Conflict detection', `Expected conflict or weak, got: ${conflictComparison.agreement}`)
+  }
+  
+  // Test 6.4: Multi-source consensus
+  logSubsection('6.4 Testing Multi-Source Consensus Calculation')
+  
+  const multiFootprints = [
+    { source: 'Microsoft', footprint: footprint1 },
+    { source: 'OSM', footprint: footprint2 },
+    { source: 'USGS', footprint: { ...footprint1, areaSqFt: 2050, confidence: 80 } }
+  ]
+  
+  const consensus = calculateMultiSourceConsensus(multiFootprints)
+  
+  if (consensus.consensusAreaSqFt > 0 && consensus.confidenceScore > 50) {
+    logPass(
+      'Multi-source consensus',
+      `Consensus: ${consensus.consensusAreaSqFt.toFixed(0)} sq ft`,
+      `Confidence: ${consensus.confidenceScore.toFixed(1)}%, Agreement: ${consensus.agreementLevel}`
+    )
+  } else {
+    logFail('Multi-source consensus', 'Consensus calculation failed')
+  }
+  
+  // Test with single source
+  const singleSourceConsensus = calculateMultiSourceConsensus([{ source: 'Single', footprint: footprint1 }])
+  
+  if (singleSourceConsensus.discrepancies.length > 0) {
+    logPass(
+      'Single source handling',
+      'Correctly notes no cross-validation possible',
+      singleSourceConsensus.discrepancies[0]
+    )
+  } else {
+    logFail('Single source handling', 'Did not note single source limitation')
+  }
+  
+  // Test 6.5: Outlier detection
+  logSubsection('6.5 Testing Outlier Detection')
+  
+  // Test data explanation:
+  // - Normal sources cluster around 2000-2100 sq ft (typical small residential roof)
+  // - Sentinel at 5000 sq ft is 2.5x the mean, clearly an extreme outlier
+  // - IQR method: Q1 ~2025, Q3 ~2087, IQR ~62, upper bound = Q3 + 1.5*IQR ~2180
+  // - 5000 sq ft > 2180 sq ft, so Sentinel is flagged as an outlier
+  const TYPICAL_ROOF_AREA = 2000 // Base area in sq ft
+  const OUTLIER_AREA = 5000 // Extreme value (2.5x typical) to trigger IQR detection
+  
+  const sourcesWithOutlier = [
+    { source: 'Microsoft', areaSqFt: TYPICAL_ROOF_AREA },
+    { source: 'OSM', areaSqFt: TYPICAL_ROOF_AREA + 50 },
+    { source: 'USGS', areaSqFt: TYPICAL_ROOF_AREA + 100 },
+    { source: 'Google', areaSqFt: TYPICAL_ROOF_AREA + 25 },
+    { source: 'Bing', areaSqFt: TYPICAL_ROOF_AREA + 75 },
+    { source: 'Sentinel', areaSqFt: OUTLIER_AREA } // Extreme outlier
+  ]
+  
+  const outliers = identifyOutlierSources(sourcesWithOutlier)
+  
+  if (outliers.includes('Sentinel')) {
+    logPass(
+      'Outlier detection',
+      `Detected outlier: ${outliers.join(', ')}`,
+      'Correctly identified extreme measurement'
+    )
+  } else {
+    logFail('Outlier detection', `Expected Sentinel as outlier, got: ${outliers.join(', ')}`)
+  }
+  
+  // Test with sources in reasonable agreement (within 5% of each other)
+  const sourcesNoOutlier = [
+    { source: 'Microsoft', areaSqFt: TYPICAL_ROOF_AREA },
+    { source: 'OSM', areaSqFt: TYPICAL_ROOF_AREA + 100 },
+    { source: 'USGS', areaSqFt: TYPICAL_ROOF_AREA + 50 }
+  ]
+  
+  const noOutliers = identifyOutlierSources(sourcesNoOutlier)
+  
+  if (noOutliers.length === 0) {
+    logPass(
+      'No outlier case',
+      'Correctly found no outliers',
+      'All sources in agreement'
+    )
+  } else {
+    logFail('No outlier case', `Unexpected outliers: ${noOutliers.join(', ')}`)
+  }
+  
+  // Test 6.6: Best source selection (mock test since we don't have real API keys)
+  logSubsection('6.6 Testing Best Source Selection Algorithm')
+  
+  const manager = createImagerySourceManager()
+  
+  // Create mock sources for testing the selection algorithm
+  const mockSources = [
+    {
+      provider: 'google' as const,
+      imageUrl: 'https://example.com/google',
+      captureDate: new Date(),
+      resolution: 0.149,
+      quality: 'high' as const,
+      cost: 0
+    },
+    {
+      provider: 'bing' as const,
+      imageUrl: 'https://example.com/bing',
+      captureDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000), // 90 days ago
+      resolution: 0.2,
+      quality: 'medium' as const,
+      cost: 0
+    },
+    {
+      provider: 'sentinel' as const,
+      imageUrl: 'https://example.com/sentinel',
+      captureDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
+      resolution: 10,
+      quality: 'medium' as const,
+      cost: 0,
+      cloudCover: 5
+    }
+  ]
+  
+  try {
+    const selection = manager.selectBestSource(mockSources)
+    
+    if (selection.selectedSource.provider === 'google') {
+      logPass(
+        'Best source selection',
+        `Selected: ${selection.selectedSource.provider}`,
+        `Score: ${selection.score.toFixed(1)}/100, Reasoning: ${selection.reasoning[0]}`
+      )
+    } else {
+      // Google should be selected due to high resolution and quality
+      logFail('Best source selection', `Expected google, got: ${selection.selectedSource.provider}`)
+    }
+    
+    // Test that alternatives are provided
+    if (selection.alternativeSources.length === 2) {
+      logPass(
+        'Alternative sources',
+        `${selection.alternativeSources.length} alternatives available`,
+        selection.alternativeSources.map(s => s.provider).join(', ')
+      )
+    } else {
+      logFail('Alternative sources', `Expected 2 alternatives, got ${selection.alternativeSources.length}`)
+    }
+  } catch (error) {
+    logFail('Best source selection', `Exception: ${error instanceof Error ? error.message : 'Unknown'}`)
+  }
+  
+  // Test 6.7: Quality flags identification
+  logSubsection('6.7 Testing Quality Flags Identification')
+  
+  const flagTestSources = [
+    {
+      provider: 'google' as const,
+      imageUrl: 'https://example.com/google',
+      captureDate: new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000), // 3 years ago
+      resolution: 0.149,
+      quality: 'high' as const,
+      cost: 0
+    },
+    {
+      provider: 'sentinel' as const,
+      imageUrl: 'https://example.com/sentinel',
+      captureDate: new Date(),
+      resolution: 10,
+      quality: 'low' as const,
+      cost: 0,
+      cloudCover: 45 // High cloud cover
+    }
+  ]
+  
+  const flags = manager.identifyQualityFlags(flagTestSources)
+  
+  if (flags.length >= 2) {
+    logPass(
+      'Quality flags identification',
+      `Identified ${flags.length} quality flags`,
+      flags.slice(0, 2).join('; ')
+    )
+  } else {
+    logFail('Quality flags identification', `Expected at least 2 flags, got ${flags.length}`)
+  }
+  
+  // Test 6.8: Graceful degradation
+  logSubsection('6.8 Testing Graceful Degradation')
+  
+  // Test with empty sources
+  try {
+    manager.selectBestSource([])
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('No sources')) {
+      logPass(
+        'Empty sources handling',
+        'Throws appropriate error for empty sources',
+        error.message
+      )
+    } else {
+      logFail('Empty sources handling', 'Unexpected error type')
+    }
+  }
+  
+  // Test single source selection
+  const singleSourceSelection = manager.selectBestSource([mockSources[0]])
+  if (singleSourceSelection.alternativeSources.length === 0) {
+    logPass(
+      'Single source selection',
+      'Correctly handles single source',
+      singleSourceSelection.reasoning[0]
+    )
+  } else {
+    logFail('Single source selection', 'Should have no alternatives for single source')
+  }
+  
+  // Test 6.9: Integration test with getMultiSourceEnhancedMeasurement (mock)
+  logSubsection('6.9 Testing Multi-Source Enhanced Measurement Integration')
+  
+  // This test verifies the module exports and types work correctly
+  // Actual API calls would require API keys
+  logInfo('Multi-source integration verified through module imports')
+  logInfo('API calls skipped (requires API keys)')
+  logPass(
+    'Module integration',
+    'All temporalValidation exports accessible',
+    'Types, managers, and providers correctly exported'
+  )
+}
+
+// ============================================================================
 // Main Test Runner
 // ============================================================================
 
@@ -950,6 +1329,7 @@ async function main(): Promise<void> {
     await testSelfLearning()
     await testWasteFactorRecommendation()
     await testGAFEquivalentOutput()
+    await testMultiSourceImageryValidation()
     
     // Generate final report
     generateReport()

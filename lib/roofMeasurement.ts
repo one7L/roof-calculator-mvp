@@ -35,7 +35,9 @@ import {
 import { 
   getEnhancedOSMData, 
   enhancedOSMToMeasurement,
-  GeometryAnalysis
+  GeometryAnalysis,
+  getMultiSourceEnhancedMeasurement,
+  extractMultiSourceValidation
 } from './enhancedOSM'
 import {
   detectAccuracyIssues,
@@ -92,6 +94,7 @@ export interface MeasurementOptions {
   instantRooferApiKey?: string
   enableFallbacks?: boolean
   enableAutoCorrection?: boolean // Enable the 3-layer autonomous system
+  enableMultiSourceValidation?: boolean // Enable multi-source imagery validation (Phase 1)
 }
 
 // Tiered fallback system types
@@ -99,6 +102,20 @@ export interface TierFailure {
   tier: number
   tierName: string
   reason: string
+}
+
+/**
+ * Multi-source validation summary for TieredMeasurementResult
+ */
+export interface MultiSourceValidation {
+  /** Names of sources that were used */
+  sourcesUsed: string[]
+  /** Variance between footprint measurements from different sources (%) */
+  footprintVariance: number
+  /** Consensus confidence score (0-100) */
+  consensusConfidence: number
+  /** Quality flags and warnings */
+  qualityFlags: string[]
 }
 
 export interface TieredMeasurementResult {
@@ -115,6 +132,8 @@ export interface TieredMeasurementResult {
   originalMeasurement?: MeasurementResult // Before correction
   // GAF-enhanced output (when available)
   gafEnhanced?: GAFEnhancedAutoTraceResult
+  // Multi-source validation results (Phase 1)
+  multiSourceValidation?: MultiSourceValidation
 }
 
 const SQM_TO_SQFT = 10.7639
@@ -277,16 +296,43 @@ export async function measureWithInstantRoofer(
  * - Regional pitch estimation based on state climate
  * - Geometry analysis for complexity/segment estimation
  * 
+ * Phase 1 adds multi-source imagery validation:
+ * - Google Static Maps
+ * - Bing Maps
+ * - USGS National Map
+ * - Sentinel-2
+ * 
  * NOTE: This function uses FOOTPRINT area and applies pitch multiplier
  * to get the actual sloped roof surface area.
  */
 export async function measureWithOpenStreetMap(
   lat: number,
   lng: number,
-  address?: string
-): Promise<MeasurementResult | null> {
+  address?: string,
+  enableMultiSource?: boolean
+): Promise<{ measurement: MeasurementResult | null; multiSourceValidation?: MultiSourceValidation }> {
   try {
-    // Use enhanced OSM data which integrates multiple free sources
+    // Use multi-source enhanced measurement if enabled
+    if (enableMultiSource) {
+      const enhancedData = await getMultiSourceEnhancedMeasurement(
+        lat, 
+        lng, 
+        address,
+        { enableMultiSource: true }
+      )
+      
+      const measurement = enhancedOSMToMeasurement(enhancedData)
+      const multiSourceValidation = extractMultiSourceValidation(enhancedData.multiSourceValidation)
+      
+      if (!measurement) {
+        const basicMeasurement = await measureWithBasicOSM(lat, lng)
+        return { measurement: basicMeasurement, multiSourceValidation }
+      }
+      
+      return { measurement, multiSourceValidation }
+    }
+    
+    // Standard enhanced OSM data path
     const enhancedData = await getEnhancedOSMData(lat, lng, address)
     
     // Convert enhanced data to MeasurementResult
@@ -294,14 +340,16 @@ export async function measureWithOpenStreetMap(
     
     if (!measurement) {
       // Fall back to basic OSM query if enhanced failed
-      return await measureWithBasicOSM(lat, lng)
+      const basicMeasurement = await measureWithBasicOSM(lat, lng)
+      return { measurement: basicMeasurement }
     }
     
-    return measurement
+    return { measurement }
   } catch (error) {
     console.error('Enhanced OpenStreetMap API error:', error)
     // Fall back to basic OSM on error
-    return await measureWithBasicOSM(lat, lng)
+    const basicMeasurement = await measureWithBasicOSM(lat, lng)
+    return { measurement: basicMeasurement }
   }
 }
 
@@ -554,14 +602,21 @@ export async function getRoofMeasurementTiered(
   }
   
   // TIER 5: OpenStreetMap (Enhanced) with Autonomous Correction System
-  const osmResult = await measureWithOpenStreetMap(options.lat, options.lng, options.address)
-  if (osmResult) {
+  // Enable multi-source validation if specified in options
+  const osmResult = await measureWithOpenStreetMap(
+    options.lat, 
+    options.lng, 
+    options.address,
+    options.enableMultiSourceValidation
+  )
+  
+  if (osmResult.measurement) {
     fallbacksAvailable.push('Manual Tracing')
     
     // If auto-correction is enabled, apply the 3-layer autonomous system
     if (options.enableAutoCorrection !== false) {
       const correctedResult = await applyAutonomousCorrection(
-        osmResult,
+        osmResult.measurement,
         options.lat,
         options.lng,
         options.zipCode,
@@ -578,17 +633,19 @@ export async function getRoofMeasurementTiered(
         accuracyDetection: correctedResult.accuracyDetection,
         autoTraceResult: correctedResult.autoTraceResult,
         selfLearningApplied: correctedResult.selfLearningApplied,
-        originalMeasurement: correctedResult.correctionApplied ? osmResult : undefined,
-        gafEnhanced: correctedResult.gafEnhanced
+        originalMeasurement: correctedResult.correctionApplied ? osmResult.measurement : undefined,
+        gafEnhanced: correctedResult.gafEnhanced,
+        multiSourceValidation: osmResult.multiSourceValidation
       }
     }
     
     return {
-      measurement: osmResult,
+      measurement: osmResult.measurement,
       tierUsed: 5,
       tierName: TIER_NAMES[5],
       higherTierFailures,
-      fallbacksAvailable
+      fallbacksAvailable,
+      multiSourceValidation: osmResult.multiSourceValidation
     }
   }
   
