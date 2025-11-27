@@ -730,3 +730,158 @@ function getComplexityFromSegments(segments: number): RoofComplexity {
   if (segments <= 12) return 'complex'
   return 'very-complex'
 }
+
+// ============ Multi-Source Integration (Phase 1) ============
+
+import { 
+  ImagerySourceManager, 
+  MultiSourceImagerySet,
+  MultiSourceValidationResult
+} from './temporalValidation'
+
+/**
+ * Options for multi-source enhanced measurement
+ */
+export interface MultiSourceOptions {
+  /** Enable multi-source imagery fetching */
+  enableMultiSource?: boolean
+  /** Include historical imagery in search */
+  includeHistorical?: boolean
+  /** Maximum cloud cover for satellite imagery (percentage) */
+  maxCloudCover?: number
+  /** Maximum age of imagery */
+  maxAge?: 'current' | '1year' | '5year'
+}
+
+/**
+ * Enhanced OSM result with multi-source validation
+ */
+export interface EnhancedOSMResultWithMultiSource extends EnhancedOSMResult {
+  /** Multi-source validation data (when enabled) */
+  multiSourceValidation?: MultiSourceImagerySet
+}
+
+/**
+ * Get multi-source enhanced measurement
+ * 
+ * Extends the standard enhanced OSM measurement with additional
+ * validation from multiple FREE imagery sources:
+ * - Google Static Maps
+ * - Bing Maps
+ * - USGS National Map
+ * - Sentinel-2
+ * 
+ * @param lat - Latitude
+ * @param lng - Longitude
+ * @param address - Optional address for regional pitch estimation
+ * @param options - Multi-source options
+ * @returns Enhanced result with multi-source validation
+ */
+export async function getMultiSourceEnhancedMeasurement(
+  lat: number,
+  lng: number,
+  address?: string,
+  options?: MultiSourceOptions
+): Promise<EnhancedOSMResultWithMultiSource> {
+  // First, get the standard enhanced OSM data
+  const enhancedData = await getEnhancedOSMData(lat, lng, address)
+  
+  // If multi-source is disabled, return standard result
+  if (!options?.enableMultiSource) {
+    return enhancedData
+  }
+  
+  // Fetch multi-source imagery
+  const imageryManager = new ImagerySourceManager()
+  
+  const multiSourceSet = await imageryManager.fetchAllImagerySourcesForLocation(
+    lat,
+    lng,
+    {
+      includeArchive: options.includeHistorical,
+      maxCloudCover: options.maxCloudCover ?? 20,
+      maxAge: options.maxAge
+    }
+  )
+  
+  // Calculate updated confidence based on multi-source validation
+  let updatedConfidence = enhancedData.confidence
+  const updatedDataSources = [...enhancedData.dataSources]
+  
+  // Add multi-source information
+  const sourceCount = multiSourceSet.sources.length
+  if (sourceCount > 1) {
+    updatedDataSources.push(`Multi-Source (${sourceCount} sources)`)
+    
+    // Boost confidence if sources agree (low variance)
+    if (multiSourceSet.footprintVariance < 5) {
+      updatedConfidence = Math.min(95, updatedConfidence + 10)
+    } else if (multiSourceSet.footprintVariance < 15) {
+      updatedConfidence = Math.min(92, updatedConfidence + 5)
+    } else if (multiSourceSet.footprintVariance > 25) {
+      // Reduce confidence if high variance
+      updatedConfidence = Math.max(50, updatedConfidence - 10)
+    }
+  }
+  
+  // Add quality flags to data sources
+  for (const flag of multiSourceSet.qualityFlags) {
+    if (!updatedDataSources.includes(flag)) {
+      updatedDataSources.push(`⚠️ ${flag}`)
+    }
+  }
+  
+  return {
+    ...enhancedData,
+    confidence: Math.min(updatedConfidence, 95),
+    dataSources: updatedDataSources,
+    multiSourceValidation: multiSourceSet
+  }
+}
+
+/**
+ * Convert multi-source validation to a summary object
+ * 
+ * Useful for including in measurement results
+ */
+export function extractMultiSourceValidation(
+  multiSource: MultiSourceImagerySet | undefined
+): MultiSourceValidationResult | undefined {
+  if (!multiSource) {
+    return undefined
+  }
+  
+  return {
+    sourcesUsed: multiSource.sources.map(s => s.provider),
+    footprintVariance: multiSource.footprintVariance,
+    consensusConfidence: multiSource.recommendedPrimary 
+      ? calculateConsensusConfidence(multiSource)
+      : 0,
+    qualityFlags: multiSource.qualityFlags
+  }
+}
+
+/**
+ * Calculate consensus confidence from multi-source data
+ */
+function calculateConsensusConfidence(multiSource: MultiSourceImagerySet): number {
+  const sourceCount = multiSource.sources.length
+  const variance = multiSource.footprintVariance
+  
+  // Base confidence on source count
+  let confidence = Math.min(70 + sourceCount * 5, 85)
+  
+  // Adjust for variance
+  if (variance < 5) {
+    confidence += 10
+  } else if (variance < 10) {
+    confidence += 5
+  } else if (variance > 20) {
+    confidence -= 10
+  } else if (variance > 15) {
+    confidence -= 5
+  }
+  
+  // Cap at 95
+  return Math.min(95, Math.max(40, confidence))
+}
