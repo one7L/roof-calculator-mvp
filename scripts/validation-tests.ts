@@ -1081,15 +1081,21 @@ async function testMultiSourceImageryValidation(): Promise<void> {
   // Test 6.5: Outlier detection
   logSubsection('6.5 Testing Outlier Detection')
   
-  // Use more data points for better IQR calculation
-  // IQR method needs sufficient spread to detect outliers
+  // Test data explanation:
+  // - Normal sources cluster around 2000-2100 sq ft (typical small residential roof)
+  // - Sentinel at 5000 sq ft is 2.5x the mean, clearly an extreme outlier
+  // - IQR method: Q1 ~2025, Q3 ~2087, IQR ~62, upper bound = Q3 + 1.5*IQR ~2180
+  // - 5000 sq ft > 2180 sq ft, so Sentinel is flagged as an outlier
+  const TYPICAL_ROOF_AREA = 2000 // Base area in sq ft
+  const OUTLIER_AREA = 5000 // Extreme value (2.5x typical) to trigger IQR detection
+  
   const sourcesWithOutlier = [
-    { source: 'Microsoft', areaSqFt: 2000 },
-    { source: 'OSM', areaSqFt: 2050 },
-    { source: 'USGS', areaSqFt: 2100 },
-    { source: 'Google', areaSqFt: 2025 },
-    { source: 'Bing', areaSqFt: 2075 },
-    { source: 'Sentinel', areaSqFt: 5000 } // Extreme outlier
+    { source: 'Microsoft', areaSqFt: TYPICAL_ROOF_AREA },
+    { source: 'OSM', areaSqFt: TYPICAL_ROOF_AREA + 50 },
+    { source: 'USGS', areaSqFt: TYPICAL_ROOF_AREA + 100 },
+    { source: 'Google', areaSqFt: TYPICAL_ROOF_AREA + 25 },
+    { source: 'Bing', areaSqFt: TYPICAL_ROOF_AREA + 75 },
+    { source: 'Sentinel', areaSqFt: OUTLIER_AREA } // Extreme outlier
   ]
   
   const outliers = identifyOutlierSources(sourcesWithOutlier)
@@ -1104,11 +1110,11 @@ async function testMultiSourceImageryValidation(): Promise<void> {
     logFail('Outlier detection', `Expected Sentinel as outlier, got: ${outliers.join(', ')}`)
   }
   
-  // Test with no outliers
+  // Test with sources in reasonable agreement (within 5% of each other)
   const sourcesNoOutlier = [
-    { source: 'Microsoft', areaSqFt: 2000 },
-    { source: 'OSM', areaSqFt: 2100 },
-    { source: 'USGS', areaSqFt: 2050 }
+    { source: 'Microsoft', areaSqFt: TYPICAL_ROOF_AREA },
+    { source: 'OSM', areaSqFt: TYPICAL_ROOF_AREA + 100 },
+    { source: 'USGS', areaSqFt: TYPICAL_ROOF_AREA + 50 }
   ]
   
   const noOutliers = identifyOutlierSources(sourcesNoOutlier)
