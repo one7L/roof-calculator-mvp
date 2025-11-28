@@ -51,3 +51,30 @@ export {
   calculateOverallVariance,
   getAgreementSummary
 } from './sourceComparator'
+
+// Phase 2: Seasonal Analysis
+export { SeasonalAnalyzer } from './seasonalAnalyzer'
+export {
+  detectSnowCover,
+  calculateSnowProbability,
+  recommendSeasonForLocation
+} from './snowDetector'
+export {
+  detectLeafCover,
+  detectStructuralChange,
+  detectHighVariance,
+  detectShadowArtifacts,
+  detectDataGap,
+  classifyAnomalySeverity,
+  summarizeAnomalies
+} from './seasonalAnomalies'
+export type {
+  SeasonalImagerySet,
+  SeasonalAnomaly,
+  SeasonalValidationResult,
+  SeasonRecommendation,
+  SeasonalAnalyzerConfig,
+  SeasonalAnomalyType,
+  AnomalySeverity
+} from './seasonalTypes'
+export type { SnowDetectionResult } from './snowDetector'
