@@ -122,10 +122,10 @@ export const DEFAULT_SEASONAL_CONFIG: SeasonalAnalyzerConfig = {
     winter: { month: 1, day: 15 }    // February 15
   },
   baseScores: {
-    spring: 75,
-    summer: 95,
-    fall: 90,
-    winter: 70
+    spring: 70,  // Leaf budding can obscure edges
+    summer: 85,  // Full foliage reduces boundary clarity
+    fall: 95,    // Optimal visibility, leaves down
+    winter: 75   // Snow risk despite no leaves
   },
   thresholds: {
     snowInflation: 5,

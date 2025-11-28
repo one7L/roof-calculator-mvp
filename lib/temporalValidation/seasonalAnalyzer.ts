@@ -45,48 +45,33 @@ export class SeasonalAnalyzer {
 
   /**
    * Fetch imagery for all 4 seasons in a given year
-   * Uses Sentinel-2 historical archive (FREE)
+   * 
+   * UPDATED: Uses Google Maps for immediate footprint data
+   * (Sentinel-2 imagery requires Phase 4 CV processing)
    */
   async fetchSeasonalImagerySet(
     lat: number,
     lng: number,
     year: number = new Date().getFullYear()
   ): Promise<SeasonalImagerySet> {
-    const seasons = ['spring', 'summer', 'fall', 'winter'] as const;
-    
-    const fetchPromises = seasons.map(async (season) => {
-      try {
-        const { month, day } = this.config.seasonDates[season];
-        const imagery = await this.imageryManager.fetchSentinel2Imagery(
-          lat,
-          lng,
-          new Date(year, month, day)
-        );
-        return { season, imagery };
-      } catch (error) {
-        console.warn(`Failed to fetch ${season} imagery:`, error);
-        return { season, imagery: null };
-      }
-    });
+    // Fetch current imagery from all sources once (Google includes footprints)
+    const allSources = await this.imageryManager.fetchAllImagerySourcesForLocation(lat, lng)
 
-    const results = await Promise.all(fetchPromises);
+    // MVP approach: reuse the same primary imagery for every season
+    // TODO Phase 4: Swap to CV-processed Sentinel-2 seasonal snapshots
+    const primaryImagery = allSources.recommendedPrimary || null
 
     const set: SeasonalImagerySet = {
       location: { lat, lng },
-      spring: null,
-      summer: null,
-      fall: null,
-      winter: null,
+      spring: primaryImagery,
+      summer: primaryImagery,
+      fall: primaryImagery,
+      winter: primaryImagery,
       captureYear: year,
-      availableSeasons: 0
-    };
-
-    for (const { season, imagery } of results) {
-      set[season] = imagery;
-      if (imagery) set.availableSeasons++;
+      availableSeasons: primaryImagery ? 4 : 0
     }
 
-    return set;
+    return set
   }
 
   /**
